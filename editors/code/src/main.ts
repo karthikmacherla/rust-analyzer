@@ -114,8 +114,8 @@ async function activateServer(ctx: Ctx): Promise<RustAnalyzerExtensionApi> {
     return ctx;
 }
 
-function createCommands(): Record<string, CommandFactory> {
-    return {
+function createCommands() {
+    const commands = {
         onEnter: {
             enabled: commands.onEnter,
             disabled: (_) => () => vscode.commands.executeCommand("default:type", { text: "\n" }),
@@ -191,5 +191,7 @@ function createCommands(): Record<string, CommandFactory> {
         showReferences: { enabled: commands.showReferences },
         triggerParameterHints: { enabled: commands.triggerParameterHints },
         openLogs: { enabled: commands.openLogs },
-    };
+    } satisfies Record<string, CommandFactory>;
+
+    return commands;
 }

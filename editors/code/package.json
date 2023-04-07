@@ -59,8 +59,8 @@
         "ovsx": "^0.5.2",
         "prettier": "^2.7.1",
         "tslib": "^2.4.0",
-        "typescript": "^4.7.4",
-        "vsce": "^2.9.2"
+        "typescript": "^5.0.0",
+        "@vscode/vsce": "^2.9.2"
     },
     "activationEvents": [
         "onLanguage:rust",

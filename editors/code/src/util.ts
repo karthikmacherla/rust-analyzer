@@ -4,13 +4,17 @@ import { strict as nativeAssert } from "assert";
 import { exec, ExecOptions, spawnSync } from "child_process";
 import { inspect } from "util";
 
-export function assert(condition: boolean, explanation: string): asserts condition {
+export function assert(condition: boolean, explanation?: string): asserts condition {
     try {
         nativeAssert(condition, explanation);
     } catch (err) {
         log.error(`Assertion failed:`, explanation);
         throw err;
     }
+}
+
+export function assertNever(value: never, reason?: string): never {
+    throw new Error(`AssertNever: ${reason}`);
 }
 
 export const log = new (class {

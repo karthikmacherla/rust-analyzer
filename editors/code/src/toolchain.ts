@@ -12,6 +12,47 @@ interface CompilationArtifact {
     isTest: boolean;
 }
 
+/**
+ * The result of `cargo metadata`
+ *
+ * This is only part of the whole structure
+ */
+export interface CargoMetadata {
+    workspace_root: string;
+    workspace_members: string[];
+    packages: CargoPackageMetadata[];
+}
+
+export enum CargoTargetKind {
+    Lib = "lib",
+    Binary = "bin",
+    Test = "test",
+    Example = "example",
+    Bench= 'bench',
+}
+
+export enum CargoCrateType {
+    Library = "lib",
+    Binary = "bin",
+}
+
+/** This is only few part of the whole structure */
+export interface CargoPackageMetadata {
+    id: string;
+    name: string;
+    manifest_path: string;
+    targets: CargoTargetMetadata[];
+}
+
+export interface CargoTargetMetadata {
+    /**
+     * In which situation could this contain not one element?
+     */
+    kind: CargoTargetKind[];
+    name: string;
+    crate_types: CargoCrateType[];
+    src_path: string;
+}
 export interface ArtifactSpec {
     cargoArgs: string[];
     filter?: (artifacts: CompilationArtifact[]) => CompilationArtifact[];
@@ -22,7 +63,7 @@ export class Cargo {
         readonly rootFolder: string,
         readonly output: vscode.OutputChannel,
         readonly env: Record<string, string>
-    ) {}
+    ) { }
 
     // Made public for testing purposes
     static artifactSpec(args: readonly string[]): ArtifactSpec {

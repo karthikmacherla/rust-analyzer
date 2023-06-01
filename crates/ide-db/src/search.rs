@@ -92,7 +92,7 @@ impl SearchScope {
     }
 
     /// Build a search scope spanning the entire crate graph of files.
-    fn crate_graph(db: &RootDatabase) -> SearchScope {
+    pub fn crate_graph(db: &RootDatabase) -> SearchScope {
         let mut entries = NoHashHashMap::default();
 
         let graph = db.crate_graph();

@@ -69,8 +69,6 @@ async function getDebugConfiguration(
     ctx: Ctx,
     runnable: ra.Runnable
 ): Promise<vscode.DebugConfiguration | undefined> {
-    const editor = ctx.activeRustEditor;
-    if (!editor) return;
 
     const knownEngines: Record<string, DebugConfigProvider> = {
         "vadimcn.vscode-lldb": getLldbDebugConfig,
@@ -91,7 +89,7 @@ async function getDebugConfiguration(
     if (!debugEngine) {
         await vscode.window.showErrorMessage(
             `Install [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb)` +
-                ` or [MS C++ tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools) extension for debugging.`
+            ` or [MS C++ tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools) extension for debugging.`
         );
         return;
     }
@@ -109,7 +107,7 @@ async function getDebugConfiguration(
         !isMultiFolderWorkspace || !runnable.args.workspaceRoot
             ? firstWorkspace
             : workspaceFolders.find((w) => runnable.args.workspaceRoot?.includes(w.uri.fsPath)) ||
-              firstWorkspace;
+            firstWorkspace;
 
     const wsFolder = path.normalize(workspace.uri.fsPath);
     const workspaceQualifier = isMultiFolderWorkspace ? `:${workspace.name}` : "";
@@ -201,5 +199,6 @@ function getCppvsDebugConfig(
         cwd: runnable.args.workspaceRoot,
         sourceFileMap,
         env,
+
     };
 }

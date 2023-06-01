@@ -536,7 +536,7 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
                 assertNever(node.targetKind);
         }
 
-        const testItem = testController!.createTestItem(node.name, `${icon}${node.name}`, node.srcPath);
+        const testItem = testController!.createTestItem(`${icon}${node.name}`, `${icon}${node.name}`, node.srcPath);
         this.addTestItemToParentOrRoot(node, testItem);
     }
 

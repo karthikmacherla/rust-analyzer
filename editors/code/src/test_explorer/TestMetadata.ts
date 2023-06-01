@@ -131,7 +131,7 @@ export class RunnableFacde {
     get uri(): vscode.Uri {
         if (this._uri) { return this._uri; }
         assert(!!this.origin.location?.targetUri, "Need to investigate why targetUri is undefined");
-        return this._uri = vscode.Uri.parse(this.origin.location?.targetUri);
+        return this._uri = vscode.Uri.parse(this.origin.location.targetUri);
     }
 
     static sortByLabel(a: RunnableFacde, b: RunnableFacde): number {

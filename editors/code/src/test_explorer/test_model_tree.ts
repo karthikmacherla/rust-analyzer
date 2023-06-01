@@ -193,7 +193,7 @@ export class WorkspacesRoot {
      * Remove the Target/TestModule/Test recusively,
      * until there is at least one item after removed.
      */
-    removeTestItemsRecusivelyByUri(uri: vscode.Uri): void {
+    removeTestItemsRecursivelyByUri(uri: vscode.Uri): void {
         const nodes: TestLikeNode[] = UriMatcher.match(uri);
         nodes.forEach(removeRecursively);
     }
@@ -251,7 +251,6 @@ function removeRecursively(node: TestLikeNode) {
                 break;
             }
             case NodeKind.Target:
-                // Target alwasy has a TestModuleNode
                 break;
             case NodeKind.TestModule: {
                 assert(

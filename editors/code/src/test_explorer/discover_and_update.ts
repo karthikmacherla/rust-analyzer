@@ -96,7 +96,7 @@ async function refreshCore() {
 
     testModelTree.initByMedatada(noDepsWorkspaces);
 
-    // After initial, the target might not conatins any test(rather than not-fetched tests)
+    // After init, the target might not conatins any test(rather than not-fetched tests)
     // So we could not collect nodes which children need to be fetched, and fetch them
     // Instead, we pretend the behavior they are changed, so that the empty target will be removed
 
@@ -127,7 +127,7 @@ function filterOutDepdencies(metadata: CargoMetadata) {
 async function handleFileCreate(uri: vscode.Uri) {
     console.log(`handleFileCreate triggered for ${uri}`);
     // Maybe we need to a "smart" strategy, when too much files changes in short time,
-    // we change to debounceRefresh to rebuild all.
+    // we change to rebuild all.
 
     await updateModelByChangeOfFile(uri);
     updateTestItemsByModel();
@@ -145,7 +145,7 @@ async function handleFileChange(uri: vscode.Uri) {
 
 async function handleFileDelete(uri: vscode.Uri) {
     console.log(`handleFileDelete triggered for ${uri}`);
-    testModelTree.removeTestItemsRecusivelyByUri(uri);
+    testModelTree.removeTestItemsRecursivelyByUri(uri);
     updateTestItemsByModel();
 }
 
@@ -163,8 +163,8 @@ async function getNormalizedTestRunnablesInFile(uri: vscode.Uri) {
     const runnables = rawRunables.map(it => new RunnableFacde(it));
 
     // User might copy and past test, and then there might be same name test or test module
-    // Although it's wrong, we need to tollerate it.
-    // We only choose the first one.
+    // Although it's wrong, we need to tolerate it.
+    // choose the first one.
     return uniqueRunnables(runnables);
 
     function uniqueRunnables(runnables: RunnableFacde[]) {
@@ -172,7 +172,7 @@ async function getNormalizedTestRunnablesInFile(uri: vscode.Uri) {
         runnables.forEach(runnable => {
             const key = `${runnable.workspaceRoot}|${runnable.packageName}|${runnable.targetKind}|${runnable.targetName}|${runnable.origin.label}`;
             if (!map.has(key)) {
-                map.set(key,runnable);
+                map.set(key, runnable);
             }
         });
         return Array.from(map.values());
@@ -185,7 +185,7 @@ async function updateModelByChangeOfFile(uri: vscode.Uri) {
     // Maybe from some to none
     // need to recursively clean the parent, until there is at least one test cases.
     if (runnables.length === 0) {
-        testModelTree.removeTestItemsRecusivelyByUri(uri);
+        testModelTree.removeTestItemsRecursivelyByUri(uri);
         return;
     }
 
@@ -235,18 +235,14 @@ async function updateModelByChangeOfFile(uri: vscode.Uri) {
     // But we want to only fetch it when cargo file is changed, to make things more lazily.
     if (rootTestModuleRunnbale.origin.label === "test-mod "
         && nearestNode.kind !== NodeKind.TestModule) {
-        assert(nearestNode.kind === NodeKind.CargoPackage);
+        assert(nearestNode.kind === NodeKind.CargoPackage, "we do not delete package node unless refetch metadata");
         // TODO: what should we do if user add a new package or workspace?
         // Maybe listen to the change of cargo file, and always refresh everything
         // This runnable is from a target, create the target if it's not exist in test model tree
-        const parentLocation = await RaApiHelper.parentModue(rootTestModuleRunnbale.uri);
-        assert(parentLocation?.length === 1, "The changed file contains runnables, there must be parent modules, and it must be cargo file.");
-        const targetUri = parentLocation[0].targetUri;
-        assert(targetUri.toLowerCase().endsWith("cargo.toml"));
         const newTargetNode = new TargetNode(nearestNode,
             rootTestModuleRunnbale.targetKind,
             rootTestModuleRunnbale.targetName,
-            targetUri);
+            rootTestModuleRunnbale.uri.fsPath);
         nearestNode.targets.add(newTargetNode);
     }
 
@@ -378,7 +374,7 @@ class FalsyLeavesCollector extends WorkspacesVisitor {
 
     private static singlton = new FalsyLeavesCollector();
 
-    public static collect(node?:Nodes) {
+    public static collect(node?: Nodes) {
         const { singlton } = FalsyLeavesCollector;
         singlton.result.clear();
         singlton.apply(node);
@@ -476,24 +472,46 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         }
     }
 
+    // Need this, for we do not delete workace node unless refetch metadata.
+    private isWorkspaceEmptyWithTests(node: CargoWorkspaceNode) {
+        return node.members.every(this.isPackageEmptyWithTests);
+    }
+
+    // Need this, we do not delete package node unless refetch metadata.
+    private isPackageEmptyWithTests(node: CargoPackageNode) {
+        return node.targets.size === 0;
+    }
+
     protected override visitCargoWorkspaceNodeCallback(node: CargoWorkspaceNode) {
         // if there is only one workspace, do not create a test item node for it
         // Flatten the items
         if (testModelTree.roots.length === 1) {
-            return;
+            return false;
+        }
+        // if there is no tests in workspace, not create test-item.
+        // and not traversal subtree
+        if (this.isWorkspaceEmptyWithTests(node)) {
+            return true;
         }
         const testItem = testController!.createTestItem(node.workspaceRoot.toString(), node.workspaceRoot.toString(), node.manifestPath);
         this.addTestItemToParentOrRoot(node, testItem);
+        return false;
     }
 
     protected override visitCargoPackageNodeCallback(node: CargoPackageNode) {
         // if there is only one package, do not create a test item node for it
         // Flatten the items
         if (node.parent.members.length === 1) {
-            return;
+            return false;
+        }
+        // if there is no tests in workspace, not create test-item.
+        // and not traversal subtree
+        if (this.isPackageEmptyWithTests(node)) {
+            return true;
         }
         const testItem = testController!.createTestItem(node.manifestPath.fsPath, `$(package)${node.name}`, node.manifestPath);
         this.addTestItemToParentOrRoot(node, testItem);
+        return false;
     }
 
     protected override visitTargetNodeCallback(node: TargetNode) {

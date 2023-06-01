@@ -2,7 +2,7 @@
 import * as vscode from "vscode";
 import * as lc from "vscode-languageclient";
 import { testController } from ".";
-import { assert, assertNever } from "../util";
+import { assert, assertNever, isRustDocument } from "../util";
 import { RaApiHelper } from "./api_helper";
 import { RunnableFacde } from "./TestMetadata";
 import { performance } from "perf_hooks";
@@ -30,16 +30,12 @@ export function registerWatcherForWorkspaces() {
     vscode.workspace.onDidChangeTextDocument(e => {
         const document = e.document;
 
-        if (!isRustFile(document)) {
+        if (!isRustDocument(document)) {
             return;
         }
 
         console.log("onDidChangeTextDocument callback");
         debounceHandleFileChangeCore(e.document.uri);
-
-        function isRustFile(document: vscode.TextDocument): boolean {
-            return document.fileName.toLowerCase().endsWith('.rs');
-        }
     });
 
     vscode.workspace.workspaceFolders

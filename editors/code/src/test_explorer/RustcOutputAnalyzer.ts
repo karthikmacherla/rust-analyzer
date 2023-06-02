@@ -20,7 +20,7 @@ const targetPatternNamedCaptureGroup = {
 
 // when target is lib/bin, there is "unittests ", when target is integration test, there is not
 const sepInRegexString = sep === '\\' ? '\\\\' : sep;
-const targetPattern = new RegExp(`Running (?:unittests )?(?<${targetPatternNamedCaptureGroup.relativePath}>.*?) \\(.*${sepInRegexString}(?<${targetPatternNamedCaptureGroup.normalizedPackageName}>.*?)-\\)`);
+const targetPattern = new RegExp(`Running (?:unittests )?(?<${targetPatternNamedCaptureGroup.relativePath}>.*?) \(.*${sepInRegexString}(?<${targetPatternNamedCaptureGroup.normalizedPackageName}>.*?)-.*?\)`);
 
 const caseResultPattern = /^test (.*?) ... (\w*)$/;
 const stacktraceTestCasePattern = /^---- (.*?) stdout ----$/;
@@ -40,11 +40,21 @@ export class RustcOutputAnalyzer {
     }
 
     public onStdErr(data: any) {
-        // TODO: maybe testRun.error() might be helpful?
-        const normalizedData = normalizeOutputData(data);
-        normalizedData.split('\r\n');
+        // This is so weird, some messages will be logged as stderr
+        // like "Finished test [unoptimized + debuginfo] target(s) in 0.07s"
+        // and "Running unittests src\lib.rs (target\debug\deps\hashbrown-3547e1bc587fc63a.exe)"
 
+        // And this make ir hard to use breakpoint to debug, because the buffer will be flushed in unexpected order.
+        const normalizedData = normalizeOutputData(data);
+
+        this.testRun.appendOutput(normalizedData);
         console.log(`StdErr:${data}`);
+
+        const lines = normalizedData.split("\r\n");
+
+        lines.forEach(line => {
+            this.analyticsCurrentTestTarget(line);
+        });
     }
 
     public onClose() {
@@ -60,12 +70,8 @@ export class RustcOutputAnalyzer {
         console.log(`Stdout:${data}`);
 
         const lines = normalizedData.split("\r\n");
-        // At the end of the output, when the tests are all finished
-        // stack trace(if any failed) will be output together in a big `data`
-        // set this flag to analytics all the output
 
         lines.forEach(line => {
-            this.analyticsCurrentTestTarget(line);
             this.analyticsTestCaseResult(line);
             this.analyticsStackTrace(line);
         });
@@ -75,7 +81,7 @@ export class RustcOutputAnalyzer {
     private _currentTargetRelativePath: string | undefined = undefined;
 
     private analyticsCurrentTestTarget(line: string) {
-        const match = targetPattern.exec(line);
+        const match = targetPattern.exec(line); // Running unittests src\\lib.rs (target\\debug\\deps\\hashbrown-3547e1bc587fc63a.exe)
         if (match) {
             this._currentNormalizedPackageName = match?.groups?.[targetPatternNamedCaptureGroup.normalizedPackageName];
             this._currentTargetRelativePath = match?.groups?.[targetPatternNamedCaptureGroup.relativePath];
@@ -112,6 +118,10 @@ export class RustcOutputAnalyzer {
         }
     }
 
+
+    // At the end of the output, when the tests are all finished
+    // stack trace(if any failed) will be output together in a big `data`
+    // set this flag to analytics all the output
     private _failureContextAnalyticsFlag = false;
     private _currentFailedRustcOutputTest: vscode.TestItem | undefined = undefined;
     private _currentFailedCaseOutputWithStackTrace: string[] = [];
@@ -152,7 +162,7 @@ export class RustcOutputAnalyzer {
 
 // why replace: refer https://code.visualstudio.com/api/extension-guides/testing#test-output
 function normalizeOutputData(data: any): string {
-    return data.toString().replace(/\n/g, '\r\n');
+    return data.toString().replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
 }
 
 enum RustcTestResult {

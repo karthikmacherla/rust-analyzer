@@ -11,16 +11,16 @@ const targetPatternNamedCaptureGroup = {
      */
     relativePath: 'relativePath',
     /**
-     * normarlized package name, '-' is relaced by '_'
-     *
+     * normarlized target name, '-' is relaced by '_'
+     * 
      * please refer https://www.reddit.com/r/rust/comments/8sezkm/where_are_the_rules_for_creating_valid_rust
      */
-    normalizedPackageName: 'normalizedPackageName',
+    normalizedTargetName: 'normalizedTargetName',
 } as const;
 
 // when target is lib/bin, there is "unittests ", when target is integration test, there is not
 const sepInRegexString = sep === '\\' ? '\\\\' : sep;
-const targetPattern = new RegExp(`Running (?:unittests )?(?<${targetPatternNamedCaptureGroup.relativePath}>.*?) \(.*${sepInRegexString}(?<${targetPatternNamedCaptureGroup.normalizedPackageName}>.*?)-.*?\)`);
+const targetPattern = new RegExp(`Running (?:unittests )?(?<${targetPatternNamedCaptureGroup.relativePath}>.*?) \(.*${sepInRegexString}(?<${targetPatternNamedCaptureGroup.normalizedTargetName}>.*?)-.*?\)`);
 
 const caseResultPattern = /^test (.*?) ... (\w*)$/;
 const stacktraceTestCasePattern = /^---- (.*?) stdout ----$/;
@@ -77,13 +77,13 @@ export class RustcOutputAnalyzer {
         });
     }
 
-    private _currentNormalizedPackageName: string | undefined = undefined;
+    private _currentNormalizedTargetName: string | undefined = undefined;
     private _currentTargetRelativePath: string | undefined = undefined;
 
     private analyticsCurrentTestTarget(line: string) {
         const match = targetPattern.exec(line); // Running unittests src\\lib.rs (target\\debug\\deps\\hashbrown-3547e1bc587fc63a.exe)
         if (match) {
-            this._currentNormalizedPackageName = match?.groups?.[targetPatternNamedCaptureGroup.normalizedPackageName];
+            this._currentNormalizedTargetName = match?.groups?.[targetPatternNamedCaptureGroup.normalizedTargetName];
             this._currentTargetRelativePath = match?.groups?.[targetPatternNamedCaptureGroup.relativePath];
         }
     }
@@ -95,7 +95,7 @@ export class RustcOutputAnalyzer {
         if (rustcCasePath && rustcTestResultString) {
             const rustcTestResult = RustcTestResult.parse(rustcTestResultString);
             const testItem = this._testItemLocator.findTestItemByRustcOutputCasePath(
-                this._currentNormalizedPackageName!,
+                this._currentNormalizedTargetName!,
                 this._currentTargetRelativePath!,
                 rustcCasePath);
             if (!testItem) { return; }
@@ -141,7 +141,7 @@ export class RustcOutputAnalyzer {
             const rustcCasePath = match?.[1];
             if (rustcCasePath) {
                 const testItem = this._testItemLocator.findTestItemByRustcOutputCasePath(
-                    this._currentNormalizedPackageName!,
+                    this._currentNormalizedTargetName!,
                     this._currentTargetRelativePath!,
                     rustcCasePath);
                 if (!testItem) { assert(false, "Should never happened. Could not bear this error."); }
@@ -193,6 +193,12 @@ class TestItemLocator {
     // We only allow one test case to be runned
     constructor(chosenRunnedTestItem: vscode.TestItem) {
         this._testModel = getTestModelByTestItem(chosenRunnedTestItem);
+        assert(this._testModel.kind === NodeKind.Test
+            || this._testModel.kind === NodeKind.TestModule
+            || this._testModel.kind === NodeKind.Target
+            || this._testModel.kind === NodeKind.CargoPackage,
+            "does not support workspace level, until we allow try to guess the target"
+        );
     }
 
     /**
@@ -205,13 +211,18 @@ class TestItemLocator {
         // get test item through path
 
         const workspaceRootNode = getWorkspaceNodeOfTestModelNode(this._testModel);
-        const packageNode = workspaceRootNode.members.find(packge => normalizePackageName(packge.name) === packageNormalizedName);
-        assert(!!packageNode);
-        const targetNode = Array.from(packageNode.targets).find(target => {
-            // not accurate, but I think it's enough
-            return target.srcPath.fsPath.includes(targetRelativePath);
-        });
-        assert(!!targetNode);
+
+        const targetCandidates = workspaceRootNode.members
+            .flatMap(packageNode => Array.from(packageNode.targets))
+            .filter(target =>
+                normalizeTargetName(target.name) === packageNormalizedName
+                && target.srcPath.fsPath.includes(targetRelativePath)
+            );
+
+        assert(targetCandidates.length === 1, "should find one and only one target node");
+        // REVIEW: What should we do if we found 2 or more candidates?
+
+        const targetNode = targetCandidates[0];
 
         const testNode = testModelTree.findTestLikeNodeUnderTarget(
             targetNode,
@@ -225,6 +236,6 @@ class TestItemLocator {
     }
 }
 
-function normalizePackageName(packageName: string) {
+function normalizeTargetName(packageName: string) {
     return packageName.replace(/-/g, '_');
 }

@@ -85,7 +85,7 @@ async function getChosenTestItems(request: vscode.TestRunRequest) {
     return request.include;
 }
 
-async function debugChosenTestItems(chosenTestItems: readonly vscode.TestItem[], _token: vscode.CancellationToken,) {
+async function debugChosenTestItems(chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
     if (!raContext) {
         return;
     }

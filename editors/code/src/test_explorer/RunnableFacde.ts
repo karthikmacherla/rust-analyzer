@@ -90,8 +90,10 @@ export class RunnableFacde {
 
     get packageName(): string {
         if (this._packageName) { return this._packageName; }
-        const packageNameIndex = this.origin.args.cargoArgs.findIndex(arg => arg === "--package") + 1;
-        return this._packageName = this.origin.args.cargoArgs[packageNameIndex];
+        const packageQualifiedNameIndex = this.origin.args.cargoArgs.findIndex(arg => arg === "--package") + 1;
+        // The format of packageQualifiedName is name:version, like hello:1.2.3.
+        const packageQualifiedName = this.origin.args.cargoArgs[packageQualifiedNameIndex];
+        return this._packageName = packageQualifiedName.split(':')[0];
     }
 
     private _integrationTestFileName?: string | null;

@@ -10,6 +10,7 @@ import { TestControllerHelper } from "./TestControllerHelper";
 import { startDebugSession } from "../debug";
 import { raContext } from "../main";
 import { RustcOutputAnalyzer } from "./RustcOutputAnalyzer";
+import { fail } from "assert";
 
 export async function runHandler(
     request: vscode.TestRunRequest,
@@ -32,8 +33,14 @@ export async function runHandler(
         case vscode.TestRunProfileKind.Run:
             await runChosenTestItems(chosenItems, token, testRun);
             return;
+        case vscode.TestRunProfileKind.Coverage:
+            await vscode.window.showErrorMessage("Not support Coverage yet");
+            break;
+        case undefined:
+            await vscode.window.showErrorMessage("Not run from program, VSCode promise this value is existed from UI");
+            break;
         default:
-            await vscode.window.showErrorMessage("NOT SUPPORT YET");
+            fail("TS does not support type narrow well in switch, never run here");
     }
 }
 
@@ -104,13 +111,13 @@ async function runChosenTestItems(chosenTestItems: readonly vscode.TestItem[], t
     const args = createArgs(runnable);
 
     // Remove --nocapture, so that we could analytics the output easily and always correctly.
-    // Otherwise, if the case will write into stdout, due to the parallel execution,
+    // Otherwise, if the case writes into stdout, due to the parallel execution,
     // the output might be messy and it might be even impossible to analytic.
-    const cleanArgs = args.filter(arg => arg !== '--nocapture');
+    const finalArgs = args.filter(arg => arg !== '--nocapture');
 
     const cwd = runnable.args.workspaceRoot || ".";
 
-    assert(cleanArgs[0] === 'test', "We only support 'test' command in test explorer for now!");
+    assert(finalArgs[0] === 'test', "We only support 'test' command in test explorer for now!");
 
     // TODO: add override cargo
     // overrideCargo: runnable.args.overrideCargo;
@@ -121,12 +128,12 @@ async function runChosenTestItems(chosenTestItems: readonly vscode.TestItem[], t
     }, chosenTestItem.children);
 
     // output the runned command.
-    testRun.appendOutput(`${cargoPath} ${cleanArgs.join(' ')}`);
+    testRun.appendOutput(`${cargoPath} ${finalArgs.join(' ')}`);
 
     const outputAnalyzer = new RustcOutputAnalyzer(testRun, chosenTestItem);
 
     // start process and listen to the output
-    const childProcess = spawn(cargoPath, cleanArgs, {
+    const childProcess = spawn(cargoPath, finalArgs, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
         // FIXME: Should we inheritage the runnableEnv too?

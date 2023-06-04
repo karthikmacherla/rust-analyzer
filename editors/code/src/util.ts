@@ -13,7 +13,7 @@ export function assert(condition: boolean, explanation?: string): asserts condit
     }
 }
 
-export function assertNever(value: never, reason?: string): never {
+export function assertNever(_value: never, reason?: string): never {
     throw new Error(`AssertNever: ${reason}`);
 }
 

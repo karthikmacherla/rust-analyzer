@@ -4,7 +4,7 @@ import * as lc from "vscode-languageclient";
 import { testController } from ".";
 import { assert, assertNever, isRustDocument } from "../util";
 import { RaApiHelper } from "./api_helper";
-import { RunnableFacde } from "./TestMetadata";
+import { RunnableFacde } from "./RunnableFacde";
 import { performance } from "perf_hooks";
 import { CargoMetadata } from "../toolchain";
 import { CargoPackageNode, CargoWorkspaceNode, TargetNode, NodeKind, TestModuleNode, testModelTree, isTestModuleNode, WorkspacesVisitor, TestNode, Nodes, TargetKind, TestLikeNode, isTestNode } from "./test_model_tree";

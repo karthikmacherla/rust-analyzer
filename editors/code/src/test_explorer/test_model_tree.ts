@@ -2,7 +2,7 @@ import path = require("node:path");
 import * as vscode from 'vscode';
 import { CargoMetadata, CargoPackageMetadata, CargoTargetKind, CargoTargetMetadata } from "../toolchain";
 import { assert, assertNever } from "../util";
-import { RunnableFacde } from "./TestMetadata";
+import { RunnableFacde } from "./RunnableFacde";
 
 export enum NodeKind {
     // VSCodeWorkSpace,

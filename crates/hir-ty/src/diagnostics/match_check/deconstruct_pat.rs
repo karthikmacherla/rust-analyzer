@@ -82,7 +82,7 @@ fn expand_or_pat(pat: &Pat) -> Vec<&Pat> {
     pats
 }
 
-/// [Constructor] uses this in umimplemented variants.
+/// [Constructor] uses this in unimplemented variants.
 /// It allows porting match expressions from upstream algorithm without losing semantics.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum Void {}
@@ -772,7 +772,7 @@ impl<'p> Fields<'p> {
 
         (0..fields_len).map(|idx| LocalFieldId::from_raw(idx.into())).filter_map(move |fid| {
             let ty = field_ty[fid].clone().substitute(Interner, substs);
-            let ty = normalize(cx.db, cx.body, ty);
+            let ty = normalize(cx.db, cx.db.trait_environment_for_body(cx.body), ty);
             let is_visible = matches!(adt, hir_def::AdtId::EnumId(..))
                 || visibility[fid].is_visible_from(cx.db.upcast(), cx.module);
             let is_uninhabited = cx.is_uninhabited(&ty);

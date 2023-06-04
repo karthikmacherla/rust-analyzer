@@ -2,7 +2,7 @@
 //! metadata` or `rust-project.json`) into representation stored in the salsa
 //! database -- `CrateGraph`.
 
-use std::{collections::VecDeque, fmt, fs, process::Command, sync::Arc};
+use std::{collections::VecDeque, fmt, fs, process::Command, sync};
 
 use anyhow::{format_err, Context, Result};
 use base_db::{
@@ -13,7 +13,8 @@ use cfg::{CfgDiff, CfgOptions};
 use paths::{AbsPath, AbsPathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
 use semver::Version;
-use stdx::{always, hash::NoHashHashMap};
+use stdx::always;
+use triomphe::Arc;
 
 use crate::{
     build_scripts::BuildScriptOutput,
@@ -23,33 +24,21 @@ use crate::{
     rustc_cfg,
     sysroot::SysrootCrate,
     target_data_layout, utf8_stdout, CargoConfig, CargoWorkspace, InvocationStrategy, ManifestPath,
-    Package, ProjectJson, ProjectManifest, Sysroot, TargetKind, WorkspaceBuildScripts,
+    Package, ProjectJson, ProjectManifest, Sysroot, TargetData, TargetKind, WorkspaceBuildScripts,
 };
 
 /// A set of cfg-overrides per crate.
-///
-/// `Wildcard(..)` is useful e.g. disabling `#[cfg(test)]` on all crates,
-/// without having to first obtain a list of all crates.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum CfgOverrides {
-    /// A single global set of overrides matching all crates.
-    Wildcard(CfgDiff),
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
+pub struct CfgOverrides {
+    /// A global set of overrides matching all crates.
+    pub global: CfgDiff,
     /// A set of overrides matching specific crates.
-    Selective(FxHashMap<String, CfgDiff>),
-}
-
-impl Default for CfgOverrides {
-    fn default() -> Self {
-        Self::Selective(FxHashMap::default())
-    }
+    pub selective: FxHashMap<String, CfgDiff>,
 }
 
 impl CfgOverrides {
     pub fn len(&self) -> usize {
-        match self {
-            CfgOverrides::Wildcard(_) => 1,
-            CfgOverrides::Selective(hash_map) => hash_map.len(),
-        }
+        self.global.len() + self.selective.iter().map(|(_, it)| it.len()).sum::<usize>()
     }
 }
 
@@ -178,7 +167,6 @@ impl ProjectWorkspace {
         };
         let res = match manifest {
             ProjectManifest::ProjectJson(project_json) => {
-                let project_json = project_json.canonicalize()?;
                 let file = fs::read_to_string(&project_json).with_context(|| {
                     format!("Failed to read json file {}", project_json.display())
                 })?;
@@ -292,7 +280,7 @@ impl ProjectWorkspace {
                 let rustc_cfg =
                     rustc_cfg::get(Some(&cargo_toml), config.target.as_deref(), &config.extra_env);
 
-                let cfg_overrides = config.cfg_overrides();
+                let cfg_overrides = config.cfg_overrides.clone();
                 let data_layout = target_data_layout::get(
                     Some(&cargo_toml),
                     config.target.as_deref(),
@@ -422,7 +410,7 @@ impl ProjectWorkspace {
         let outputs = &mut match WorkspaceBuildScripts::run_once(config, &cargo_ws, progress) {
             Ok(it) => Ok(it.into_iter()),
             // io::Error is not Clone?
-            Err(e) => Err(Arc::new(e)),
+            Err(e) => Err(sync::Arc::new(e)),
         };
 
         workspaces
@@ -459,18 +447,35 @@ impl ProjectWorkspace {
         }
     }
 
-    pub fn find_sysroot_proc_macro_srv(&self) -> Option<AbsPathBuf> {
+    pub fn find_sysroot_proc_macro_srv(&self) -> Result<AbsPathBuf> {
         match self {
             ProjectWorkspace::Cargo { sysroot: Ok(sysroot), .. }
-            | ProjectWorkspace::Json { sysroot: Ok(sysroot), .. } => {
+            | ProjectWorkspace::Json { sysroot: Ok(sysroot), .. }
+            | ProjectWorkspace::DetachedFiles { sysroot: Ok(sysroot), .. } => {
                 let standalone_server_name =
                     format!("rust-analyzer-proc-macro-srv{}", std::env::consts::EXE_SUFFIX);
                 ["libexec", "lib"]
                     .into_iter()
                     .map(|segment| sysroot.root().join(segment).join(&standalone_server_name))
                     .find(|server_path| std::fs::metadata(server_path).is_ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot find proc-macro server in sysroot `{}`",
+                            sysroot.root().display()
+                        )
+                    })
             }
-            _ => None,
+            ProjectWorkspace::DetachedFiles { .. } => {
+                Err(anyhow::anyhow!("cannot find proc-macro server, no sysroot was found"))
+            }
+            ProjectWorkspace::Cargo { cargo, .. } => Err(anyhow::anyhow!(
+                "cannot find proc-macro-srv, the workspace `{}` is missing a sysroot",
+                cargo.workspace_root().display()
+            )),
+            ProjectWorkspace::Json { project, .. } => Err(anyhow::anyhow!(
+                "cannot find proc-macro-srv, the workspace `{}` is missing a sysroot",
+                project.path().display()
+            )),
         }
     }
 
@@ -622,6 +627,7 @@ impl ProjectWorkspace {
                 sysroot.as_ref().ok(),
                 rustc_cfg.clone(),
                 cfg_overrides,
+                None,
                 build_scripts,
                 match target_layout.as_ref() {
                     Ok(it) => Ok(Arc::from(it.as_str())),
@@ -732,7 +738,7 @@ fn project_json_to_crate_graph(
     });
 
     let mut cfg_cache: FxHashMap<&str, Vec<CfgFlag>> = FxHashMap::default();
-    let crates: NoHashHashMap<CrateId, CrateId> = project
+    let crates: FxHashMap<CrateId, CrateId> = project
         .crates()
         .filter_map(|(crate_id, krate)| Some((crate_id, krate, load(&krate.root_module)?)))
         .map(
@@ -779,7 +785,7 @@ fn project_json_to_crate_graph(
                         CrateOrigin::Local { repo: None, name: None }
                     },
                     target_layout.clone(),
-                    None,
+                    channel,
                 );
                 if *is_proc_macro {
                     if let Some(path) = proc_macro_dylib_path.clone() {
@@ -821,6 +827,8 @@ fn cargo_to_crate_graph(
     sysroot: Option<&Sysroot>,
     rustc_cfg: Vec<CfgFlag>,
     override_cfg: &CfgOverrides,
+    // Don't compute cfg and use this if present
+    forced_cfg: Option<CfgOptions>,
     build_scripts: &WorkspaceBuildScripts,
     target_layout: TargetLayoutLoadResult,
     channel: Option<ReleaseChannel>,
@@ -858,7 +866,7 @@ fn cargo_to_crate_graph(
     for pkg in cargo.packages() {
         has_private |= cargo[pkg].metadata.rustc_private;
 
-        let cfg_options = {
+        let cfg_options = forced_cfg.clone().unwrap_or_else(|| {
             let mut cfg_options = cfg_options.clone();
 
             // Add test cfg for local crates
@@ -866,12 +874,10 @@ fn cargo_to_crate_graph(
                 cfg_options.insert_atom("test".into());
             }
 
-            let overrides = match override_cfg {
-                CfgOverrides::Wildcard(cfg_diff) => Some(cfg_diff),
-                CfgOverrides::Selective(cfg_overrides) => cfg_overrides.get(&cargo[pkg].name),
+            if !override_cfg.global.is_empty() {
+                cfg_options.apply_diff(override_cfg.global.clone());
             };
-
-            if let Some(overrides) = overrides {
+            if let Some(diff) = override_cfg.selective.get(&cargo[pkg].name) {
                 // FIXME: this is sort of a hack to deal with #![cfg(not(test))] vanishing such as seen
                 // in ed25519_dalek (#7243), and libcore (#9203) (although you only hit that one while
                 // working on rust-lang/rust as that's the only time it appears outside sysroot).
@@ -879,10 +885,10 @@ fn cargo_to_crate_graph(
                 // A more ideal solution might be to reanalyze crates based on where the cursor is and
                 // figure out the set of cfgs that would have to apply to make it active.
 
-                cfg_options.apply_diff(overrides.clone());
+                cfg_options.apply_diff(diff.clone());
             };
             cfg_options
-        };
+        });
 
         let mut lib_tgt = None;
         for &tgt in cargo[pkg].targets.iter() {
@@ -894,7 +900,24 @@ fn cargo_to_crate_graph(
                 // https://github.com/rust-lang/rust-analyzer/issues/11300
                 continue;
             }
-            let Some(file_id) =  load(&cargo[tgt].root) else { continue };
+            let &TargetData { ref name, kind, is_proc_macro, ref root, .. } = &cargo[tgt];
+
+            if kind == TargetKind::Lib
+                && sysroot.map_or(false, |sysroot| root.starts_with(sysroot.src_root()))
+            {
+                if let Some(&(_, crate_id, _)) =
+                    public_deps.deps.iter().find(|(dep_name, ..)| dep_name.as_smol_str() == name)
+                {
+                    pkg_crates.entry(pkg).or_insert_with(Vec::new).push((crate_id, kind));
+
+                    lib_tgt = Some((crate_id, name.clone()));
+                    pkg_to_lib_crate.insert(pkg, crate_id);
+                    // sysroot is inside the workspace, prevent the sysroot crates from being duplicated here
+                    continue;
+                }
+            }
+
+            let Some(file_id) = load(root) else { continue };
 
             let crate_id = add_target_crate_root(
                 crate_graph,
@@ -903,23 +926,23 @@ fn cargo_to_crate_graph(
                 build_scripts.get_output(pkg),
                 cfg_options.clone(),
                 file_id,
-                &cargo[tgt].name,
-                cargo[tgt].is_proc_macro,
+                name,
+                is_proc_macro,
                 target_layout.clone(),
                 false,
                 channel,
             );
-            if cargo[tgt].kind == TargetKind::Lib {
-                lib_tgt = Some((crate_id, cargo[tgt].name.clone()));
+            if kind == TargetKind::Lib {
+                lib_tgt = Some((crate_id, name.clone()));
                 pkg_to_lib_crate.insert(pkg, crate_id);
             }
             // Even crates that don't set proc-macro = true are allowed to depend on proc_macro
             // (just none of the APIs work when called outside of a proc macro).
             if let Some(proc_macro) = libproc_macro {
-                add_proc_macro_dep(crate_graph, crate_id, proc_macro, cargo[tgt].is_proc_macro);
+                add_proc_macro_dep(crate_graph, crate_id, proc_macro, is_proc_macro);
             }
 
-            pkg_crates.entry(pkg).or_insert_with(Vec::new).push((crate_id, cargo[tgt].kind));
+            pkg_crates.entry(pkg).or_insert_with(Vec::new).push((crate_id, kind));
         }
 
         // Set deps to the core, std and to the lib target of the current package
@@ -1089,14 +1112,10 @@ fn handle_rustc_crates(
 
             let mut cfg_options = cfg_options.clone();
 
-            let overrides = match override_cfg {
-                CfgOverrides::Wildcard(cfg_diff) => Some(cfg_diff),
-                CfgOverrides::Selective(cfg_overrides) => {
-                    cfg_overrides.get(&rustc_workspace[pkg].name)
-                }
+            if !override_cfg.global.is_empty() {
+                cfg_options.apply_diff(override_cfg.global.clone());
             };
-
-            if let Some(overrides) = overrides {
+            if let Some(diff) = override_cfg.selective.get(&rustc_workspace[pkg].name) {
                 // FIXME: this is sort of a hack to deal with #![cfg(not(test))] vanishing such as seen
                 // in ed25519_dalek (#7243), and libcore (#9203) (although you only hit that one while
                 // working on rust-lang/rust as that's the only time it appears outside sysroot).
@@ -1104,7 +1123,7 @@ fn handle_rustc_crates(
                 // A more ideal solution might be to reanalyze crates based on where the cursor is and
                 // figure out the set of cfgs that would have to apply to make it active.
 
-                cfg_options.apply_diff(overrides.clone());
+                cfg_options.apply_diff(diff.clone());
             };
 
             for &tgt in rustc_workspace[pkg].targets.iter() {
@@ -1246,7 +1265,7 @@ fn add_target_crate_root(
     if is_proc_macro {
         let proc_macro = match build_data.as_ref().map(|it| it.proc_macro_dylib_path.as_ref()) {
             Some(it) => it.cloned().map(|path| Ok((Some(cargo_name.to_owned()), path))),
-            None => Some(Err("crate has not yet been build".to_owned())),
+            None => Some(Err("crate has not yet been built".to_owned())),
         };
         if let Some(proc_macro) = proc_macro {
             proc_macros.insert(crate_id, proc_macro);
@@ -1280,31 +1299,43 @@ fn sysroot_to_crate_graph(
 ) -> (SysrootPublicDeps, Option<CrateId>) {
     let _p = profile::span("sysroot_to_crate_graph");
     let mut cfg_options = CfgOptions::default();
-    cfg_options.extend(rustc_cfg);
-    let sysroot_crates: FxHashMap<SysrootCrate, CrateId> = sysroot
-        .crates()
-        .filter_map(|krate| {
-            let file_id = load(&sysroot[krate].root)?;
+    cfg_options.extend(rustc_cfg.clone());
+    let sysroot_crates: FxHashMap<SysrootCrate, CrateId> = match &sysroot.hack_cargo_workspace {
+        Some(cargo) => handle_hack_cargo_workspace(
+            load,
+            cargo,
+            rustc_cfg,
+            cfg_options,
+            target_layout,
+            channel,
+            crate_graph,
+            sysroot,
+        ),
+        None => sysroot
+            .crates()
+            .filter_map(|krate| {
+                let file_id = load(&sysroot[krate].root)?;
 
-            let env = Env::default();
-            let display_name = CrateDisplayName::from_canonical_name(sysroot[krate].name.clone());
-            let crate_id = crate_graph.add_crate_root(
-                file_id,
-                Edition::CURRENT,
-                Some(display_name),
-                None,
-                cfg_options.clone(),
-                None,
-                env,
-                false,
-                CrateOrigin::Lang(LangCrateOrigin::from(&*sysroot[krate].name)),
-                target_layout.clone(),
-                channel,
-            );
-            Some((krate, crate_id))
-        })
-        .collect();
-
+                let env = Env::default();
+                let display_name =
+                    CrateDisplayName::from_canonical_name(sysroot[krate].name.clone());
+                let crate_id = crate_graph.add_crate_root(
+                    file_id,
+                    Edition::CURRENT,
+                    Some(display_name),
+                    None,
+                    cfg_options.clone(),
+                    None,
+                    env,
+                    false,
+                    CrateOrigin::Lang(LangCrateOrigin::from(&*sysroot[krate].name)),
+                    target_layout.clone(),
+                    channel,
+                );
+                Some((krate, crate_id))
+            })
+            .collect(),
+    };
     for from in sysroot.crates() {
         for &to in sysroot[from].deps.iter() {
             let name = CrateName::new(&sysroot[to].name).unwrap();
@@ -1323,6 +1354,63 @@ fn sysroot_to_crate_graph(
 
     let libproc_macro = sysroot.proc_macro().and_then(|it| sysroot_crates.get(&it).copied());
     (public_deps, libproc_macro)
+}
+
+fn handle_hack_cargo_workspace(
+    load: &mut dyn FnMut(&AbsPath) -> Option<FileId>,
+    cargo: &CargoWorkspace,
+    rustc_cfg: Vec<CfgFlag>,
+    cfg_options: CfgOptions,
+    target_layout: Result<Arc<str>, Arc<str>>,
+    channel: Option<ReleaseChannel>,
+    crate_graph: &mut CrateGraph,
+    sysroot: &Sysroot,
+) -> FxHashMap<SysrootCrate, CrateId> {
+    let (cg, mut pm) = cargo_to_crate_graph(
+        load,
+        None,
+        cargo,
+        None,
+        rustc_cfg,
+        &CfgOverrides::default(),
+        Some(cfg_options),
+        &WorkspaceBuildScripts::default(),
+        target_layout,
+        channel,
+    );
+    crate_graph.extend(cg, &mut pm);
+    for crate_name in ["std", "alloc", "core"] {
+        let original = crate_graph
+            .iter()
+            .find(|x| {
+                crate_graph[*x]
+                    .display_name
+                    .as_ref()
+                    .map(|x| x.canonical_name() == crate_name)
+                    .unwrap_or(false)
+            })
+            .unwrap();
+        let fake_crate_name = format!("rustc-std-workspace-{}", crate_name);
+        let fake = crate_graph
+            .iter()
+            .find(|x| {
+                crate_graph[*x]
+                    .display_name
+                    .as_ref()
+                    .map(|x| x.canonical_name() == fake_crate_name)
+                    .unwrap_or(false)
+            })
+            .unwrap();
+        crate_graph.remove_and_replace(fake, original).unwrap();
+    }
+    sysroot
+        .crates()
+        .filter_map(|krate| {
+            let file_id = load(&sysroot[krate].root)?;
+            let crate_id = crate_graph.crate_id_for_crate_root(file_id)?;
+            Some((krate, crate_id))
+        })
+        .collect()
 }
 
 fn add_dep(graph: &mut CrateGraph, from: CrateId, name: CrateName, to: CrateId) {

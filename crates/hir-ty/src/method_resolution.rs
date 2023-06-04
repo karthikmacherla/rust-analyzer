@@ -2,19 +2,22 @@
 //! For details about how this works in rustc, see the method lookup page in the
 //! [rustc guide](https://rust-lang.github.io/rustc-guide/method-lookup.html)
 //! and the corresponding code mostly in rustc_hir_analysis/check/method/probe.rs.
-use std::{ops::ControlFlow, sync::Arc};
+use std::ops::ControlFlow;
 
 use base_db::{CrateId, Edition};
 use chalk_ir::{cast::Cast, Mutability, TyKind, UniverseIndex, WhereClause};
 use hir_def::{
-    adt::StructFlags, data::ImplData, item_scope::ItemScope, nameres::DefMap, AssocItemId, BlockId,
-    ConstId, FunctionId, HasModule, ImplId, ItemContainerId, Lookup, ModuleDefId, ModuleId,
-    TraitId,
+    data::{adt::StructFlags, ImplData},
+    item_scope::ItemScope,
+    nameres::DefMap,
+    AssocItemId, BlockId, ConstId, FunctionId, HasModule, ImplId, ItemContainerId, Lookup,
+    ModuleDefId, ModuleId, TraitId,
 };
 use hir_expand::name::Name;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
 use stdx::never;
+use triomphe::Arc;
 
 use crate::{
     autoderef::{self, AutoderefKind},
@@ -147,31 +150,30 @@ impl TraitImpls {
         Arc::new(impls)
     }
 
-    pub(crate) fn trait_impls_in_block_query(
-        db: &dyn HirDatabase,
-        block: BlockId,
-    ) -> Option<Arc<Self>> {
+    pub(crate) fn trait_impls_in_block_query(db: &dyn HirDatabase, block: BlockId) -> Arc<Self> {
         let _p = profile::span("trait_impls_in_block_query");
         let mut impls = Self { map: FxHashMap::default() };
 
-        let block_def_map = db.block_def_map(block)?;
+        let block_def_map = db.block_def_map(block);
         impls.collect_def_map(db, &block_def_map);
         impls.shrink_to_fit();
 
-        Some(Arc::new(impls))
+        Arc::new(impls)
     }
 
-    pub(crate) fn trait_impls_in_deps_query(db: &dyn HirDatabase, krate: CrateId) -> Arc<Self> {
+    pub(crate) fn trait_impls_in_deps_query(
+        db: &dyn HirDatabase,
+        krate: CrateId,
+    ) -> Arc<[Arc<Self>]> {
         let _p = profile::span("trait_impls_in_deps_query").detail(|| format!("{krate:?}"));
         let crate_graph = db.crate_graph();
-        let mut res = Self { map: FxHashMap::default() };
-
-        for krate in crate_graph.transitive_deps(krate) {
-            res.merge(&db.trait_impls_in_crate(krate));
-        }
-        res.shrink_to_fit();
-
-        Arc::new(res)
+        // FIXME: use `Arc::from_iter` when it becomes available
+        Arc::from(
+            crate_graph
+                .transitive_deps(krate)
+                .map(|krate| db.trait_impls_in_crate(krate))
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn shrink_to_fit(&mut self) {
@@ -185,6 +187,15 @@ impl TraitImpls {
     fn collect_def_map(&mut self, db: &dyn HirDatabase, def_map: &DefMap) {
         for (_module_id, module_data) in def_map.modules() {
             for impl_id in module_data.scope.impls() {
+                // Reservation impls should be ignored during trait resolution, so we never need
+                // them during type analysis. See rust-lang/rust#64631 for details.
+                //
+                // FIXME: Reservation impls should be considered during coherence checks. If we are
+                // (ever) to implement coherence checks, this filtering should be done by the trait
+                // solver.
+                if db.attrs(impl_id.into()).by_key("rustc_reservation_impl").exists() {
+                    continue;
+                }
                 let target_trait = match db.impl_trait(impl_id) {
                     Some(tr) => tr.skip_binders().hir_trait_id(),
                     None => continue,
@@ -206,15 +217,6 @@ impl TraitImpls {
                 for (_, block_def_map) in body.blocks(db.upcast()) {
                     self.collect_def_map(db, &block_def_map);
                 }
-            }
-        }
-    }
-
-    fn merge(&mut self, other: &Self) {
-        for (trait_, other_map) in &other.map {
-            let map = self.map.entry(*trait_).or_default();
-            for (fp, impls) in other_map {
-                map.entry(*fp).or_default().extend(impls);
             }
         }
     }
@@ -281,18 +283,15 @@ impl InherentImpls {
         Arc::new(impls)
     }
 
-    pub(crate) fn inherent_impls_in_block_query(
-        db: &dyn HirDatabase,
-        block: BlockId,
-    ) -> Option<Arc<Self>> {
+    pub(crate) fn inherent_impls_in_block_query(db: &dyn HirDatabase, block: BlockId) -> Arc<Self> {
         let _p = profile::span("inherent_impls_in_block_query");
         let mut impls = Self { map: FxHashMap::default(), invalid_impls: Vec::default() };
 
-        let block_def_map = db.block_def_map(block)?;
+        let block_def_map = db.block_def_map(block);
         impls.collect_def_map(db, &block_def_map);
         impls.shrink_to_fit();
 
-        Some(Arc::new(impls))
+        Arc::new(impls)
     }
 
     fn shrink_to_fit(&mut self) {
@@ -700,7 +699,7 @@ pub fn lookup_impl_method(
     };
 
     let name = &db.function_data(func).name;
-    lookup_impl_assoc_item_for_trait_ref(trait_ref, db, env, name)
+    let Some((impl_fn, impl_subst)) = lookup_impl_assoc_item_for_trait_ref(trait_ref, db, env, name)
         .and_then(|assoc| {
             if let (AssocItemId::FunctionId(id), subst) = assoc {
                 Some((id, subst))
@@ -708,7 +707,16 @@ pub fn lookup_impl_method(
                 None
             }
         })
-        .unwrap_or((func, fn_subst))
+    else {
+        return (func, fn_subst);
+    };
+    (
+        impl_fn,
+        Substitution::from_iter(
+            Interner,
+            fn_subst.iter(Interner).take(fn_params).chain(impl_subst.iter(Interner)),
+        ),
+    )
 }
 
 fn lookup_impl_assoc_item_for_trait_ref(
@@ -717,10 +725,20 @@ fn lookup_impl_assoc_item_for_trait_ref(
     env: Arc<TraitEnvironment>,
     name: &Name,
 ) -> Option<(AssocItemId, Substitution)> {
+    let hir_trait_id = trait_ref.hir_trait_id();
     let self_ty = trait_ref.self_type_parameter(Interner);
     let self_ty_fp = TyFingerprint::for_trait_impl(&self_ty)?;
     let impls = db.trait_impls_in_deps(env.krate);
-    let impls = impls.for_trait_and_self_ty(trait_ref.hir_trait_id(), self_ty_fp);
+    let self_impls = match self_ty.kind(Interner) {
+        TyKind::Adt(id, _) => {
+            id.0.module(db.upcast()).containing_block().map(|x| db.trait_impls_in_block(x))
+        }
+        _ => None,
+    };
+    let impls = impls
+        .iter()
+        .chain(self_impls.as_ref())
+        .flat_map(|impls| impls.for_trait_and_self_ty(hir_trait_id, self_ty_fp));
 
     let table = InferenceTable::new(db, env);
 
@@ -746,9 +764,8 @@ fn find_matching_impl(
     actual_trait_ref: TraitRef,
 ) -> Option<(Arc<ImplData>, Substitution)> {
     let db = table.db;
-    loop {
-        let impl_ = impls.next()?;
-        let r = table.run_in_snapshot(|table| {
+    impls.find_map(|impl_| {
+        table.run_in_snapshot(|table| {
             let impl_data = db.impl_data(impl_);
             let impl_substs =
                 TyBuilder::subst_for_def(db, impl_, None).fill_with_inference_vars(table).build();
@@ -765,12 +782,11 @@ fn find_matching_impl(
                 .into_iter()
                 .map(|b| b.cast(Interner));
             let goal = crate::Goal::all(Interner, wcs);
-            table.try_obligation(goal).map(|_| (impl_data, table.resolve_completely(impl_substs)))
-        });
-        if r.is_some() {
-            break r;
-        }
-    }
+            table.try_obligation(goal.clone())?;
+            table.register_obligation(goal);
+            Some((impl_data, table.resolve_completely(impl_substs)))
+        })
+    })
 }
 
 fn is_inherent_impl_coherent(
@@ -952,7 +968,14 @@ fn iterate_method_candidates_with_autoref(
         )
     };
 
-    iterate_method_candidates_by_receiver(receiver_ty, first_adjustment.clone())?;
+    let mut maybe_reborrowed = first_adjustment.clone();
+    if let Some((_, _, m)) = receiver_ty.value.as_reference() {
+        // Prefer reborrow of references to move
+        maybe_reborrowed.autoref = Some(m);
+        maybe_reborrowed.autoderefs += 1;
+    }
+
+    iterate_method_candidates_by_receiver(receiver_ty, maybe_reborrowed)?;
 
     let refed = Canonical {
         value: TyKind::Ref(Mutability::Not, static_lifetime(), receiver_ty.value.clone())
@@ -1169,23 +1192,19 @@ fn iterate_inherent_methods(
     };
 
     while let Some(block_id) = block {
-        if let Some(impls) = db.inherent_impls_in_block(block_id) {
-            impls_for_self_ty(
-                &impls,
-                self_ty,
-                table,
-                name,
-                receiver_ty,
-                receiver_adjustments.clone(),
-                module,
-                callback,
-            )?;
-        }
+        let impls = db.inherent_impls_in_block(block_id);
+        impls_for_self_ty(
+            &impls,
+            self_ty,
+            table,
+            name,
+            receiver_ty,
+            receiver_adjustments.clone(),
+            module,
+            callback,
+        )?;
 
-        block = db
-            .block_def_map(block_id)
-            .and_then(|map| map.parent())
-            .and_then(|module| module.containing_block());
+        block = db.block_def_map(block_id).parent().and_then(|module| module.containing_block());
     }
 
     for krate in def_crates {

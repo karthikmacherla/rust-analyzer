@@ -1,5 +1,9 @@
 //! MIR lowering for patterns
 
+use hir_def::{hir::LiteralOrConst, resolver::HasResolver, AssocItemId};
+
+use crate::utils::pattern_matching_dereference_count;
+
 use super::*;
 
 macro_rules! not_supported {
@@ -21,7 +25,7 @@ impl MirLowerCtx<'_> {
     /// mismatched path block is `None`.
     ///
     /// By default, it will create a new block for mismatched path. If you already have one, you can provide it with
-    /// `current_else` argument to save an unneccessary jump. If `current_else` isn't `None`, the result mismatched path
+    /// `current_else` argument to save an unnecessary jump. If `current_else` isn't `None`, the result mismatched path
     /// wouldn't be `None` as well. Note that this function will add jumps to the beginning of the `current_else` block,
     /// so it should be an empty block.
     pub(super) fn pattern_match(
@@ -34,7 +38,7 @@ impl MirLowerCtx<'_> {
         mut binding_mode: BindingAnnotation,
     ) -> Result<(BasicBlockId, Option<BasicBlockId>)> {
         Ok(match &self.body.pats[pattern] {
-            Pat::Missing => return Err(MirLowerError::IncompleteExpr),
+            Pat::Missing => return Err(MirLowerError::IncompletePattern),
             Pat::Wild => (current, current_else),
             Pat::Tuple { args, ellipsis } => {
                 pattern_matching_dereference(&mut cond_ty, &mut binding_mode, &mut cond_place);
@@ -52,7 +56,7 @@ impl MirLowerCtx<'_> {
                     args,
                     *ellipsis,
                     subst.iter(Interner).enumerate().map(|(i, x)| {
-                        (PlaceElem::TupleField(i), x.assert_ty_ref(Interner).clone())
+                        (PlaceElem::TupleOrClosureField(i), x.assert_ty_ref(Interner).clone())
                     }),
                     &cond_place,
                     binding_mode,
@@ -70,7 +74,7 @@ impl MirLowerCtx<'_> {
                         *pat,
                         binding_mode,
                     )?;
-                    self.set_goto(next, then_target);
+                    self.set_goto(next, then_target, pattern.into());
                     match next_else {
                         Some(t) => {
                             current = t;
@@ -83,13 +87,13 @@ impl MirLowerCtx<'_> {
                 }
                 if !finished {
                     let ce = *current_else.get_or_insert_with(|| self.new_basic_block());
-                    self.set_goto(current, ce);
+                    self.set_goto(current, ce, pattern.into());
                 }
                 (then_target, current_else)
             }
             Pat::Record { args, .. } => {
                 let Some(variant) = self.infer.variant_resolution_for_pat(pattern) else {
-                    not_supported!("unresolved variant");
+                    not_supported!("unresolved variant for record");
                 };
                 self.pattern_matching_variant(
                     cond_ty,
@@ -102,13 +106,142 @@ impl MirLowerCtx<'_> {
                     AdtPatternShape::Record { args: &*args },
                 )?
             }
-            Pat::Range { .. } => not_supported!("range pattern"),
-            Pat::Slice { .. } => not_supported!("slice pattern"),
-            Pat::Path(_) => {
-                let Some(variant) = self.infer.variant_resolution_for_pat(pattern) else {
-                    not_supported!("unresolved variant");
+            Pat::Range { start, end } => {
+                let mut add_check = |l: &LiteralOrConst, binop| -> Result<()> {
+                    let lv = self.lower_literal_or_const_to_operand(cond_ty.clone(), l)?;
+                    let else_target = *current_else.get_or_insert_with(|| self.new_basic_block());
+                    let next = self.new_basic_block();
+                    let discr: Place =
+                        self.temp(TyBuilder::bool(), current, pattern.into())?.into();
+                    self.push_assignment(
+                        current,
+                        discr.clone(),
+                        Rvalue::CheckedBinaryOp(binop, lv, Operand::Copy(cond_place.clone())),
+                        pattern.into(),
+                    );
+                    let discr = Operand::Copy(discr);
+                    self.set_terminator(
+                        current,
+                        TerminatorKind::SwitchInt {
+                            discr,
+                            targets: SwitchTargets::static_if(1, next, else_target),
+                        },
+                        pattern.into(),
+                    );
+                    current = next;
+                    Ok(())
                 };
-                self.pattern_matching_variant(
+                if let Some(start) = start {
+                    add_check(start, BinOp::Le)?;
+                }
+                if let Some(end) = end {
+                    add_check(end, BinOp::Ge)?;
+                }
+                (current, current_else)
+            }
+            Pat::Slice { prefix, slice, suffix } => {
+                pattern_matching_dereference(&mut cond_ty, &mut binding_mode, &mut cond_place);
+                if let TyKind::Slice(_) = cond_ty.kind(Interner) {
+                    let pattern_len = prefix.len() + suffix.len();
+                    let place_len: Place =
+                        self.temp(TyBuilder::usize(), current, pattern.into())?.into();
+                    self.push_assignment(
+                        current,
+                        place_len.clone(),
+                        Rvalue::Len(cond_place.clone()),
+                        pattern.into(),
+                    );
+                    let else_target = *current_else.get_or_insert_with(|| self.new_basic_block());
+                    let next = self.new_basic_block();
+                    if slice.is_none() {
+                        self.set_terminator(
+                            current,
+                            TerminatorKind::SwitchInt {
+                                discr: Operand::Copy(place_len),
+                                targets: SwitchTargets::static_if(
+                                    pattern_len as u128,
+                                    next,
+                                    else_target,
+                                ),
+                            },
+                            pattern.into(),
+                        );
+                    } else {
+                        let c = Operand::from_concrete_const(
+                            pattern_len.to_le_bytes().to_vec(),
+                            MemoryMap::default(),
+                            TyBuilder::usize(),
+                        );
+                        let discr: Place =
+                            self.temp(TyBuilder::bool(), current, pattern.into())?.into();
+                        self.push_assignment(
+                            current,
+                            discr.clone(),
+                            Rvalue::CheckedBinaryOp(BinOp::Le, c, Operand::Copy(place_len)),
+                            pattern.into(),
+                        );
+                        let discr = Operand::Copy(discr);
+                        self.set_terminator(
+                            current,
+                            TerminatorKind::SwitchInt {
+                                discr,
+                                targets: SwitchTargets::static_if(1, next, else_target),
+                            },
+                            pattern.into(),
+                        );
+                    }
+                    current = next;
+                }
+                for (i, &pat) in prefix.iter().enumerate() {
+                    let next_place = cond_place.project(ProjectionElem::ConstantIndex {
+                        offset: i as u64,
+                        from_end: false,
+                    });
+                    let cond_ty = self.infer[pat].clone();
+                    (current, current_else) = self.pattern_match(
+                        current,
+                        current_else,
+                        next_place,
+                        cond_ty,
+                        pat,
+                        binding_mode,
+                    )?;
+                }
+                if let Some(slice) = slice {
+                    if let Pat::Bind { id, subpat: _ } = self.body[*slice] {
+                        let next_place = cond_place.project(ProjectionElem::Subslice {
+                            from: prefix.len() as u64,
+                            to: suffix.len() as u64,
+                        });
+                        (current, current_else) = self.pattern_match_binding(
+                            id,
+                            &mut binding_mode,
+                            next_place,
+                            (*slice).into(),
+                            current,
+                            current_else,
+                        )?;
+                    }
+                }
+                for (i, &pat) in suffix.iter().enumerate() {
+                    let next_place = cond_place.project(ProjectionElem::ConstantIndex {
+                        offset: i as u64,
+                        from_end: true,
+                    });
+                    let cond_ty = self.infer[pat].clone();
+                    (current, current_else) = self.pattern_match(
+                        current,
+                        current_else,
+                        next_place,
+                        cond_ty,
+                        pat,
+                        binding_mode,
+                    )?;
+                }
+                (current, current_else)
+            }
+            Pat::Path(p) => match self.infer.variant_resolution_for_pat(pattern) {
+                Some(variant) => self.pattern_matching_variant(
                     cond_ty,
                     binding_mode,
                     cond_place,
@@ -117,8 +250,53 @@ impl MirLowerCtx<'_> {
                     pattern.into(),
                     current_else,
                     AdtPatternShape::Unit,
-                )?
-            }
+                )?,
+                None => {
+                    let unresolved_name = || MirLowerError::unresolved_path(self.db, p);
+                    let resolver = self.owner.resolver(self.db.upcast());
+                    let pr = resolver
+                        .resolve_path_in_value_ns(self.db.upcast(), p)
+                        .ok_or_else(unresolved_name)?;
+                    let (c, subst) = 'b: {
+                        if let Some(x) = self.infer.assoc_resolutions_for_pat(pattern) {
+                            if let AssocItemId::ConstId(c) = x.0 {
+                                break 'b (c, x.1);
+                            }
+                        }
+                        if let ResolveValueResult::ValueNs(v) = pr {
+                            if let ValueNs::ConstId(c) = v {
+                                break 'b (c, Substitution::empty(Interner));
+                            }
+                        }
+                        not_supported!("path in pattern position that is not const or variant")
+                    };
+                    let tmp: Place = self.temp(cond_ty.clone(), current, pattern.into())?.into();
+                    let span = pattern.into();
+                    self.lower_const(c.into(), current, tmp.clone(), subst, span, cond_ty.clone())?;
+                    let tmp2: Place = self.temp(TyBuilder::bool(), current, pattern.into())?.into();
+                    self.push_assignment(
+                        current,
+                        tmp2.clone(),
+                        Rvalue::CheckedBinaryOp(
+                            BinOp::Eq,
+                            Operand::Copy(tmp),
+                            Operand::Copy(cond_place),
+                        ),
+                        span,
+                    );
+                    let next = self.new_basic_block();
+                    let else_target = current_else.unwrap_or_else(|| self.new_basic_block());
+                    self.set_terminator(
+                        current,
+                        TerminatorKind::SwitchInt {
+                            discr: Operand::Copy(tmp2),
+                            targets: SwitchTargets::static_if(1, next, else_target),
+                        },
+                        span,
+                    );
+                    (next, Some(else_target))
+                }
+            },
             Pat::Lit(l) => match &self.body.exprs[*l] {
                 Expr::Literal(l) => {
                     let c = self.lower_literal_to_operand(cond_ty, l)?;
@@ -127,8 +305,6 @@ impl MirLowerCtx<'_> {
                 _ => not_supported!("expression path literal"),
             },
             Pat::Bind { id, subpat } => {
-                let target_place = self.result.binding_locals[*id];
-                let mode = self.body.bindings[*id].mode;
                 if let Some(subpat) = subpat {
                     (current, current_else) = self.pattern_match(
                         current,
@@ -139,26 +315,14 @@ impl MirLowerCtx<'_> {
                         binding_mode,
                     )?
                 }
-                if matches!(mode, BindingAnnotation::Ref | BindingAnnotation::RefMut) {
-                    binding_mode = mode;
-                }
-                self.push_storage_live(*id, current);
-                self.push_assignment(
-                    current,
-                    target_place.into(),
-                    match binding_mode {
-                        BindingAnnotation::Unannotated | BindingAnnotation::Mutable => {
-                            Operand::Copy(cond_place).into()
-                        }
-                        BindingAnnotation::Ref => Rvalue::Ref(BorrowKind::Shared, cond_place),
-                        BindingAnnotation::RefMut => Rvalue::Ref(
-                            BorrowKind::Mut { allow_two_phase_borrow: false },
-                            cond_place,
-                        ),
-                    },
+                self.pattern_match_binding(
+                    *id,
+                    &mut binding_mode,
+                    cond_place,
                     pattern.into(),
-                );
-                (current, current_else)
+                    current,
+                    current_else,
+                )?
             }
             Pat::TupleStruct { path: _, args, ellipsis } => {
                 let Some(variant) = self.infer.variant_resolution_for_pat(pattern) else {
@@ -178,11 +342,10 @@ impl MirLowerCtx<'_> {
             Pat::Ref { pat, mutability: _ } => {
                 if let Some((ty, _, _)) = cond_ty.as_reference() {
                     cond_ty = ty.clone();
-                    cond_place.projection.push(ProjectionElem::Deref);
                     self.pattern_match(
                         current,
                         current_else,
-                        cond_place,
+                        cond_place.project(ProjectionElem::Deref),
                         cond_ty,
                         *pat,
                         binding_mode,
@@ -196,6 +359,38 @@ impl MirLowerCtx<'_> {
         })
     }
 
+    fn pattern_match_binding(
+        &mut self,
+        id: BindingId,
+        binding_mode: &mut BindingAnnotation,
+        cond_place: Place,
+        span: MirSpan,
+        current: BasicBlockId,
+        current_else: Option<BasicBlockId>,
+    ) -> Result<(BasicBlockId, Option<BasicBlockId>)> {
+        let target_place = self.binding_local(id)?;
+        let mode = self.body.bindings[id].mode;
+        if matches!(mode, BindingAnnotation::Ref | BindingAnnotation::RefMut) {
+            *binding_mode = mode;
+        }
+        self.push_storage_live(id, current)?;
+        self.push_assignment(
+            current,
+            target_place.into(),
+            match *binding_mode {
+                BindingAnnotation::Unannotated | BindingAnnotation::Mutable => {
+                    Operand::Copy(cond_place).into()
+                }
+                BindingAnnotation::Ref => Rvalue::Ref(BorrowKind::Shared, cond_place),
+                BindingAnnotation::RefMut => {
+                    Rvalue::Ref(BorrowKind::Mut { allow_two_phase_borrow: false }, cond_place)
+                }
+            },
+            span,
+        );
+        Ok((current, current_else))
+    }
+
     fn pattern_match_const(
         &mut self,
         current_else: Option<BasicBlockId>,
@@ -206,7 +401,7 @@ impl MirLowerCtx<'_> {
     ) -> Result<(BasicBlockId, Option<BasicBlockId>)> {
         let then_target = self.new_basic_block();
         let else_target = current_else.unwrap_or_else(|| self.new_basic_block());
-        let discr: Place = self.temp(TyBuilder::bool())?.into();
+        let discr: Place = self.temp(TyBuilder::bool(), current, pattern.into())?.into();
         self.push_assignment(
             current,
             discr.clone(),
@@ -216,10 +411,11 @@ impl MirLowerCtx<'_> {
         let discr = Operand::Copy(discr);
         self.set_terminator(
             current,
-            Terminator::SwitchInt {
+            TerminatorKind::SwitchInt {
                 discr,
                 targets: SwitchTargets::static_if(1, then_target, else_target),
             },
+            pattern.into(),
         );
         Ok((then_target, Some(else_target)))
     }
@@ -242,22 +438,23 @@ impl MirLowerCtx<'_> {
         };
         Ok(match variant {
             VariantId::EnumVariantId(v) => {
-                let e = self.db.const_eval_discriminant(v)? as u128;
-                let next = self.new_basic_block();
-                let tmp = self.discr_temp_place();
+                let e = self.const_eval_discriminant(v)? as u128;
+                let tmp = self.discr_temp_place(current);
                 self.push_assignment(
                     current,
                     tmp.clone(),
                     Rvalue::Discriminant(cond_place.clone()),
                     span,
                 );
+                let next = self.new_basic_block();
                 let else_target = current_else.unwrap_or_else(|| self.new_basic_block());
                 self.set_terminator(
                     current,
-                    Terminator::SwitchInt {
+                    TerminatorKind::SwitchInt {
                         discr: Operand::Copy(tmp),
                         targets: SwitchTargets::static_if(e, next, else_target),
                     },
+                    span,
                 );
                 let enum_data = self.db.enum_data(v.parent);
                 self.pattern_matching_variant_fields(
@@ -354,8 +551,7 @@ impl MirLowerCtx<'_> {
         binding_mode: BindingAnnotation,
     ) -> Result<(BasicBlockId, Option<BasicBlockId>)> {
         for (proj, arg, ty) in args {
-            let mut cond_place = cond_place.clone();
-            cond_place.projection.push(proj);
+            let cond_place = cond_place.project(proj);
             (current, current_else) =
                 self.pattern_match(current, current_else, cond_place, ty, arg, binding_mode)?;
         }
@@ -387,13 +583,12 @@ fn pattern_matching_dereference(
     binding_mode: &mut BindingAnnotation,
     cond_place: &mut Place,
 ) {
-    while let Some((ty, _, mu)) = cond_ty.as_reference() {
-        if mu == Mutability::Mut && *binding_mode != BindingAnnotation::Ref {
-            *binding_mode = BindingAnnotation::RefMut;
-        } else {
-            *binding_mode = BindingAnnotation::Ref;
-        }
-        *cond_ty = ty.clone();
-        cond_place.projection.push(ProjectionElem::Deref);
-    }
+    let cnt = pattern_matching_dereference_count(cond_ty, binding_mode);
+    cond_place.projection = cond_place
+        .projection
+        .iter()
+        .cloned()
+        .chain((0..cnt).map(|_| ProjectionElem::Deref))
+        .collect::<Vec<_>>()
+        .into();
 }

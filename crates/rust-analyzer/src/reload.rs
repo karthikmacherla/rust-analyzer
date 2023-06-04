@@ -12,7 +12,7 @@
 //! correct. Instead, we try to provide a best-effort service. Even if the
 //! project is currently loading and we don't have a full project model, we
 //! still want to respond to various  requests.
-use std::{collections::hash_map::Entry, iter, mem, sync::Arc};
+use std::{collections::hash_map::Entry, iter, mem, sync};
 
 use flycheck::{FlycheckConfig, FlycheckHandle};
 use hir::db::DefDatabase;
@@ -27,7 +27,9 @@ use ide_db::{
 use itertools::Itertools;
 use proc_macro_api::{MacroDylib, ProcMacroServer};
 use project_model::{PackageRoot, ProjectWorkspace, WorkspaceBuildScripts};
+use stdx::{format_to, thread::ThreadIntent};
 use syntax::SmolStr;
+use triomphe::Arc;
 use vfs::{file_set::FileSetConfig, AbsPath, AbsPathBuf, ChangeKind};
 
 use crate::{
@@ -114,6 +116,10 @@ impl GlobalState {
             status.health = lsp_ext::Health::Warning;
             message.push_str("Failed to run build scripts of some packages.\n\n");
         }
+        if self.proc_macro_clients.iter().any(|it| it.is_err()) {
+            status.health = lsp_ext::Health::Warning;
+            message.push_str("Failed to spawn one or more proc-macro servers.\n\n");
+        }
         if !self.config.cargo_autoreload()
             && self.is_quiescent()
             && self.fetch_workspaces_queue.op_requested()
@@ -129,15 +135,34 @@ impl GlobalState {
             message.push_str("Failed to discover workspace.\n");
             message.push_str("Consider adding the `Cargo.toml` of the workspace to the [`linkedProjects`](https://rust-analyzer.github.io/manual.html#rust-analyzer.linkedProjects) setting.\n\n");
         }
+        if let Some(err) = &self.config_errors {
+            status.health = lsp_ext::Health::Warning;
+            format_to!(message, "{err}\n");
+        }
+        if let Some(err) = &self.last_flycheck_error {
+            status.health = lsp_ext::Health::Warning;
+            message.push_str(err);
+            message.push('\n');
+        }
 
         for ws in self.workspaces.iter() {
             let (ProjectWorkspace::Cargo { sysroot, .. }
             | ProjectWorkspace::Json { sysroot, .. }
             | ProjectWorkspace::DetachedFiles { sysroot, .. }) = ws;
-            if let Err(Some(e)) = sysroot {
-                status.health = lsp_ext::Health::Warning;
-                message.push_str(e);
-                message.push_str("\n\n");
+            match sysroot {
+                Err(None) => (),
+                Err(Some(e)) => {
+                    status.health = lsp_ext::Health::Warning;
+                    message.push_str(e);
+                    message.push_str("\n\n");
+                }
+                Ok(s) => {
+                    if let Some(e) = s.loading_warning() {
+                        status.health = lsp_ext::Health::Warning;
+                        message.push_str(&e);
+                        message.push_str("\n\n");
+                    }
+                }
             }
             if let ProjectWorkspace::Cargo { rustc: Err(Some(e)), .. } = ws {
                 status.health = lsp_ext::Health::Warning;
@@ -160,7 +185,7 @@ impl GlobalState {
     pub(crate) fn fetch_workspaces(&mut self, cause: Cause) {
         tracing::info!(%cause, "will fetch workspaces");
 
-        self.task_pool.handle.spawn_with_sender({
+        self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, {
             let linked_projects = self.config.linked_projects();
             let detached_files = self.config.detached_files().to_vec();
             let cargo_config = self.config.cargo();
@@ -198,6 +223,24 @@ impl GlobalState {
                     })
                     .collect::<Vec<_>>();
 
+                let mut i = 0;
+                while i < workspaces.len() {
+                    if let Ok(w) = &workspaces[i] {
+                        let dupes: Vec<_> = workspaces
+                            .iter()
+                            .enumerate()
+                            .skip(i + 1)
+                            .filter_map(|(i, it)| {
+                                it.as_ref().ok().filter(|ws| ws.eq_ignore_build_data(w)).map(|_| i)
+                            })
+                            .collect();
+                        dupes.into_iter().rev().for_each(|d| {
+                            _ = workspaces.remove(d);
+                        });
+                    }
+                    i += 1;
+                }
+
                 if !detached_files.is_empty() {
                     workspaces.push(project_model::ProjectWorkspace::load_detached_files(
                         detached_files,
@@ -217,7 +260,7 @@ impl GlobalState {
         tracing::info!(%cause, "will fetch build data");
         let workspaces = Arc::clone(&self.workspaces);
         let config = self.config.cargo();
-        self.task_pool.handle.spawn_with_sender(move |sender| {
+        self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, move |sender| {
             sender.send(Task::FetchBuildData(BuildDataProgress::Begin)).unwrap();
 
             let progress = {
@@ -237,7 +280,7 @@ impl GlobalState {
         let dummy_replacements = self.config.dummy_replacements().clone();
         let proc_macro_clients = self.proc_macro_clients.clone();
 
-        self.task_pool.handle.spawn_with_sender(move |sender| {
+        self.task_pool.handle.spawn_with_sender(ThreadIntent::Worker, move |sender| {
             sender.send(Task::LoadProcMacros(ProcMacroProgress::Begin)).unwrap();
 
             let dummy_replacements = &dummy_replacements;
@@ -251,8 +294,8 @@ impl GlobalState {
             let mut res = FxHashMap::default();
             let chain = proc_macro_clients
                 .iter()
-                .map(|res| res.as_ref().map_err(|e| &**e))
-                .chain(iter::repeat_with(|| Err("Proc macros servers are not running")));
+                .map(|res| res.as_ref().map_err(|e| e.to_string()))
+                .chain(iter::repeat_with(|| Err("Proc macros servers are not running".into())));
             for (client, paths) in chain.zip(paths) {
                 res.extend(paths.into_iter().map(move |(crate_id, res)| {
                     (
@@ -261,16 +304,18 @@ impl GlobalState {
                             |_| Err("proc macro crate is missing dylib".to_owned()),
                             |(crate_name, path)| {
                                 progress(path.display().to_string());
-                                load_proc_macro(
-                                    client,
-                                    &path,
-                                    crate_name
-                                        .as_deref()
-                                        .and_then(|crate_name| {
-                                            dummy_replacements.get(crate_name).map(|v| &**v)
-                                        })
-                                        .unwrap_or_default(),
-                                )
+                                client.as_ref().map_err(Clone::clone).and_then(|client| {
+                                    load_proc_macro(
+                                        client,
+                                        &path,
+                                        crate_name
+                                            .as_deref()
+                                            .and_then(|crate_name| {
+                                                dummy_replacements.get(crate_name).map(|v| &**v)
+                                            })
+                                            .unwrap_or_default(),
+                                    )
+                                })
                             },
                         ),
                     )
@@ -378,37 +423,35 @@ impl GlobalState {
         let project_folders = ProjectFolders::new(&self.workspaces, &files_config.exclude);
 
         if self.proc_macro_clients.is_empty() || !same_workspaces {
-            if let Some((path, path_manually_set)) = self.config.proc_macro_srv() {
+            if self.config.expand_proc_macros() {
                 tracing::info!("Spawning proc-macro servers");
-                self.proc_macro_clients = self
-                    .workspaces
-                    .iter()
-                    .map(|ws| {
-                        let (path, args): (_, &[_]) = if path_manually_set {
-                            tracing::debug!(
-                                "Pro-macro server path explicitly set: {}",
-                                path.display()
-                            );
-                            (path.clone(), &[])
-                        } else {
-                            match ws.find_sysroot_proc_macro_srv() {
-                                Some(server_path) => (server_path, &[]),
-                                None => (path.clone(), &["proc-macro"]),
-                            }
-                        };
 
-                        tracing::info!(?args, "Using proc-macro server at {}", path.display(),);
-                        ProcMacroServer::spawn(path.clone(), args).map_err(|err| {
-                            let error = format!(
-                                "Failed to run proc-macro server from path {}, error: {:?}",
-                                path.display(),
-                                err
-                            );
-                            tracing::error!(error);
-                            error
+                // FIXME: use `Arc::from_iter` when it becomes available
+                self.proc_macro_clients = Arc::from(
+                    self.workspaces
+                        .iter()
+                        .map(|ws| {
+                            let path = match self.config.proc_macro_srv() {
+                                Some(path) => path,
+                                None => ws.find_sysroot_proc_macro_srv()?,
+                            };
+
+                            tracing::info!("Using proc-macro server at {}", path.display(),);
+                            ProcMacroServer::spawn(path.clone()).map_err(|err| {
+                                tracing::error!(
+                                    "Failed to run proc-macro server from path {}, error: {:?}",
+                                    path.display(),
+                                    err
+                                );
+                                anyhow::anyhow!(
+                                    "Failed to run proc-macro server from path {}, error: {:?}",
+                                    path.display(),
+                                    err
+                                )
+                            })
                         })
-                    })
-                    .collect()
+                        .collect::<Vec<_>>(),
+                )
             };
         }
 
@@ -447,7 +490,7 @@ impl GlobalState {
             let mut proc_macros = Vec::default();
             for ws in &**self.workspaces {
                 let (other, mut crate_proc_macros) =
-                    ws.to_crate_graph(&mut load, &self.config.cargo().extra_env);
+                    ws.to_crate_graph(&mut load, &self.config.extra_env());
                 crate_graph.extend(other, &mut crate_proc_macros);
                 proc_macros.push(crate_proc_macros);
             }
@@ -703,11 +746,10 @@ impl SourceRootConfig {
 /// Load the proc-macros for the given lib path, replacing all expanders whose names are in `dummy_replace`
 /// with an identity dummy expander.
 pub(crate) fn load_proc_macro(
-    server: Result<&ProcMacroServer, &str>,
+    server: &ProcMacroServer,
     path: &AbsPath,
     dummy_replace: &[Box<str>],
 ) -> ProcMacroLoadResult {
-    let server = server.map_err(ToOwned::to_owned)?;
     let res: Result<Vec<_>, String> = (|| {
         let dylib = MacroDylib::new(path.to_path_buf());
         let vec = server.load_dylib(dylib).map_err(|e| format!("{e}"))?;
@@ -744,14 +786,14 @@ pub(crate) fn load_proc_macro(
             proc_macro_api::ProcMacroKind::FuncLike => ProcMacroKind::FuncLike,
             proc_macro_api::ProcMacroKind::Attr => ProcMacroKind::Attr,
         };
-        let expander: Arc<dyn ProcMacroExpander> =
+        let expander: sync::Arc<dyn ProcMacroExpander> =
             if dummy_replace.iter().any(|replace| &**replace == name) {
                 match kind {
-                    ProcMacroKind::Attr => Arc::new(IdentityExpander),
-                    _ => Arc::new(EmptyExpander),
+                    ProcMacroKind::Attr => sync::Arc::new(IdentityExpander),
+                    _ => sync::Arc::new(EmptyExpander),
                 }
             } else {
-                Arc::new(Expander(expander))
+                sync::Arc::new(Expander(expander))
             };
         ProcMacro { name, kind, expander }
     }

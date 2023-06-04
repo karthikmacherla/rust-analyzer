@@ -7,7 +7,8 @@ use chalk_ir::{Goal, GoalData};
 use hir_def::TypeAliasId;
 use intern::{impl_internable, Interned};
 use smallvec::SmallVec;
-use std::{fmt, sync::Arc};
+use std::fmt;
+use triomphe::Arc;
 
 #[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub struct Interner;
@@ -43,7 +44,7 @@ impl_internable!(
 );
 
 impl chalk_ir::interner::Interner for Interner {
-    type InternedType = Interned<InternedWrapper<chalk_ir::TyData<Interner>>>;
+    type InternedType = Interned<InternedWrapper<chalk_ir::TyData<Self>>>;
     type InternedLifetime = Interned<InternedWrapper<chalk_ir::LifetimeData<Self>>>;
     type InternedConst = Interned<InternedWrapper<chalk_ir::ConstData<Self>>>;
     type InternedConcreteConst = ConstScalar;

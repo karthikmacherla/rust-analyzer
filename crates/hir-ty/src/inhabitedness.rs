@@ -6,8 +6,8 @@ use chalk_ir::{
     DebruijnIndex,
 };
 use hir_def::{
-    adt::VariantData, attr::Attrs, visibility::Visibility, AdtId, EnumVariantId, HasModule, Lookup,
-    ModuleId, VariantId,
+    attr::Attrs, data::adt::VariantData, visibility::Visibility, AdtId, EnumVariantId, HasModule,
+    Lookup, ModuleId, VariantId,
 };
 use rustc_hash::FxHashSet;
 
@@ -82,7 +82,7 @@ impl TypeVisitor<Interner> for UninhabitedFrom<'_> {
             TyKind::Adt(adt, subst) => self.visit_adt(adt.0, subst),
             TyKind::Never => BREAK_VISIBLY_UNINHABITED,
             TyKind::Tuple(..) => ty.super_visit_with(self, outer_binder),
-            TyKind::Array(item_ty, len) => match try_const_usize(len) {
+            TyKind::Array(item_ty, len) => match try_const_usize(self.db, len) {
                 Some(0) | None => CONTINUE_OPAQUELY_INHABITED,
                 Some(1..) => item_ty.super_visit_with(self, outer_binder),
             },

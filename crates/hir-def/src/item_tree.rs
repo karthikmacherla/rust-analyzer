@@ -40,7 +40,6 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     ops::Index,
-    sync::Arc,
 };
 
 use ast::{AstNode, HasName, StructKind};
@@ -60,6 +59,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stdx::never;
 use syntax::{ast, match_ast, SyntaxKind};
+use triomphe::Arc;
 
 use crate::{
     attr::Attrs,
@@ -101,16 +101,14 @@ pub struct ItemTree {
     top_level: SmallVec<[ModItem; 1]>,
     attrs: FxHashMap<AttrOwner, RawAttrs>,
 
+    // FIXME: Remove this indirection, an item tree is almost always non-empty?
     data: Option<Box<ItemTreeData>>,
 }
 
 impl ItemTree {
     pub(crate) fn file_item_tree_query(db: &dyn DefDatabase, file_id: HirFileId) -> Arc<ItemTree> {
         let _p = profile::span("file_item_tree_query").detail(|| format!("{file_id:?}"));
-        let syntax = match db.parse_or_expand(file_id) {
-            Some(node) => node,
-            None => return Default::default(),
-        };
+        let syntax = db.parse_or_expand(file_id);
         if never!(syntax.kind() == SyntaxKind::ERROR, "{:?} from {:?} {}", file_id, syntax, syntax)
         {
             // FIXME: not 100% sure why these crop up, but return an empty tree to avoid a panic
@@ -152,14 +150,6 @@ impl ItemTree {
         &self.top_level
     }
 
-    pub fn block_has_items(
-        db: &dyn DefDatabase,
-        file_id: HirFileId,
-        block: &ast::BlockExpr,
-    ) -> bool {
-        lower::Ctx::new(db, file_id).block_has_items(block)
-    }
-
     /// Returns the inner attributes of the source file.
     pub fn top_level_attrs(&self, db: &dyn DefDatabase, krate: CrateId) -> Attrs {
         Attrs::filter(
@@ -177,8 +167,8 @@ impl ItemTree {
         Attrs::filter(db, krate, self.raw_attrs(of).clone())
     }
 
-    pub fn pretty_print(&self) -> String {
-        pretty::print_item_tree(self)
+    pub fn pretty_print(&self, db: &dyn DefDatabase) -> String {
+        pretty::print_item_tree(db.upcast(), self)
     }
 
     fn data(&self) -> &ItemTreeData {
@@ -614,12 +604,12 @@ pub struct Function {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Param {
-    Normal(Option<Name>, Interned<TypeRef>),
+    Normal(Interned<TypeRef>),
     Varargs,
 }
 
 bitflags::bitflags! {
-    #[derive(Default)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
     pub(crate) struct FnFlags: u8 {
         const HAS_SELF_PARAM = 1 << 0;
         const HAS_BODY = 1 << 1;

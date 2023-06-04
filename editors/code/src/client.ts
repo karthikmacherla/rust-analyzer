@@ -125,7 +125,11 @@ export async function createClient(
                         typeof diag.code === "string" || typeof diag.code === "number"
                             ? diag.code
                             : diag.code?.value;
-                    if (value === "unlinked-file" && !unlinkedFiles.includes(uri)) {
+                    if (
+                        value === "unlinked-file" &&
+                        !unlinkedFiles.includes(uri) &&
+                        diag.message !== "file not included in module tree"
+                    ) {
                         const config = vscode.workspace.getConfiguration("rust-analyzer");
                         if (config.get("showUnlinkedFileNotification")) {
                             unlinkedFiles.push(uri);
@@ -362,6 +366,7 @@ export async function createClient(
 
     // To turn on all proposed features use: client.registerProposedFeatures();
     client.registerFeature(new ExperimentalFeatures());
+    client.registerFeature(new OverrideFeatures());
 
     return client;
 }
@@ -389,6 +394,25 @@ class ExperimentalFeatures implements lc.StaticFeature {
             },
             ...capabilities.experimental,
         };
+    }
+    initialize(
+        _capabilities: lc.ServerCapabilities,
+        _documentSelector: lc.DocumentSelector | undefined
+    ): void {}
+    dispose(): void {}
+}
+
+class OverrideFeatures implements lc.StaticFeature {
+    getState(): lc.FeatureState {
+        return { kind: "static" };
+    }
+    fillClientCapabilities(capabilities: lc.ClientCapabilities): void {
+        // Force disable `augmentsSyntaxTokens`, VSCode's textmate grammar is somewhat incomplete
+        // making the experience generally worse
+        const caps = capabilities.textDocument?.semanticTokens;
+        if (caps) {
+            caps.augmentsSyntaxTokens = false;
+        }
     }
     initialize(
         _capabilities: lc.ServerCapabilities,

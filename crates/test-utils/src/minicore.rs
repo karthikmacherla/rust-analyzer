@@ -11,6 +11,8 @@
 //!     add:
 //!     as_ref: sized
 //!     bool_impl: option, fn
+//!     builtin_impls:
+//!     cell: copy, drop
 //!     clone: sized
 //!     coerce_unsized: unsize
 //!     copy: clone
@@ -21,7 +23,7 @@
 //!     drop:
 //!     eq: sized
 //!     error: fmt
-//!     fmt: result
+//!     fmt: result, transmute, coerce_unsized
 //!     fn:
 //!     from: sized
 //!     future: pin
@@ -31,9 +33,12 @@
 //!     infallible:
 //!     iterator: option
 //!     iterators: iterator, fn
+//!     manually_drop: drop
 //!     non_zero:
-//!     option:
+//!     option: panic
 //!     ord: eq, option
+//!     panic: fmt
+//!     phantom_data:
 //!     pin:
 //!     range:
 //!     result:
@@ -41,6 +46,7 @@
 //!     sized:
 //!     slice:
 //!     sync: sized
+//!     transmute:
 //!     try: infallible
 //!     unsize: sized
 
@@ -106,6 +112,7 @@ pub mod marker {
         impl<T: ?Sized> Copy for *const T {}
         impl<T: ?Sized> Copy for *mut T {}
         impl<T: ?Sized> Copy for &T {}
+        impl Copy for ! {}
     }
     // endregion:copy
 
@@ -113,6 +120,11 @@ pub mod marker {
     #[lang = "tuple_trait"]
     pub trait Tuple {}
     // endregion:fn
+
+    // region:phantom_data
+    #[lang = "phantom_data"]
+    pub struct PhantomData<T: ?Sized>;
+    // endregion:phantom_data
 }
 
 // region:default
@@ -124,6 +136,27 @@ pub mod default {
     #[rustc_builtin_macro(Default, attributes(default))]
     pub macro Default($item:item) {}
     // endregion:derive
+
+    // region:builtin_impls
+    macro_rules! impl_default {
+        ($v:literal; $($t:ty)*) => {
+            $(
+                impl const Default for $t {
+                    fn default() -> Self {
+                        $v
+                    }
+                }
+            )*
+        }
+    }
+
+    impl_default! {
+        0; usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128
+    }
+    impl_default! {
+        0.0; f32 f64
+    }
+    // endregion:builtin_impls
 }
 // endregion:default
 
@@ -134,8 +167,59 @@ pub mod hash {
     pub trait Hash {
         fn hash<H: Hasher>(&self, state: &mut H);
     }
+
+    // region:derive
+    #[rustc_builtin_macro]
+    pub macro Hash($item:item) {}
+    // endregion:derive
 }
 // endregion:hash
+
+// region:cell
+pub mod cell {
+    use crate::mem;
+
+    #[lang = "unsafe_cell"]
+    pub struct UnsafeCell<T: ?Sized> {
+        value: T,
+    }
+
+    impl<T> UnsafeCell<T> {
+        pub const fn new(value: T) -> UnsafeCell<T> {
+            UnsafeCell { value }
+        }
+
+        pub const fn get(&self) -> *mut T {
+            self as *const UnsafeCell<T> as *const T as *mut T
+        }
+    }
+
+    pub struct Cell<T: ?Sized> {
+        value: UnsafeCell<T>,
+    }
+
+    impl<T> Cell<T> {
+        pub const fn new(value: T) -> Cell<T> {
+            Cell { value: UnsafeCell::new(value) }
+        }
+
+        pub fn set(&self, val: T) {
+            let old = self.replace(val);
+            mem::drop(old);
+        }
+
+        pub fn replace(&self, val: T) -> T {
+            mem::replace(unsafe { &mut *self.value.get() }, val)
+        }
+    }
+
+    impl<T: Copy> Cell<T> {
+        pub fn get(&self) -> T {
+            unsafe { *self.value.get() }
+        }
+    }
+}
+// endregion:cell
 
 // region:clone
 pub mod clone {
@@ -143,6 +227,40 @@ pub mod clone {
     pub trait Clone: Sized {
         fn clone(&self) -> Self;
     }
+
+    impl<T> Clone for &T {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+
+    // region:builtin_impls
+    macro_rules! impl_clone {
+        ($($t:ty)*) => {
+            $(
+                impl const Clone for $t {
+                    fn clone(&self) -> Self {
+                        *self
+                    }
+                }
+            )*
+        }
+    }
+
+    impl_clone! {
+        usize u8 u16 u32 u64 u128
+        isize i8 i16 i32 i64 i128
+        f32 f64
+        bool char
+    }
+
+    impl Clone for ! {
+        fn clone(&self) {
+            *self
+        }
+    }
+    // endregion:builtin_impls
+
     // region:derive
     #[rustc_builtin_macro]
     pub macro Clone($item:item) {}
@@ -183,6 +301,64 @@ pub mod convert {
     // region:infallible
     pub enum Infallible {}
     // endregion:infallible
+}
+
+pub mod mem {
+    // region:drop
+    // region:manually_drop
+    #[lang = "manually_drop"]
+    #[repr(transparent)]
+    pub struct ManuallyDrop<T: ?Sized> {
+        value: T,
+    }
+
+    impl<T> ManuallyDrop<T> {
+        pub const fn new(value: T) -> ManuallyDrop<T> {
+            ManuallyDrop { value }
+        }
+    }
+
+    // region:deref
+    impl<T: ?Sized> crate::ops::Deref for ManuallyDrop<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.value
+        }
+    }
+    // endregion:deref
+
+    // endregion:manually_drop
+
+    pub fn drop<T>(_x: T) {}
+    pub const fn replace<T>(dest: &mut T, src: T) -> T {
+        unsafe {
+            let result = crate::ptr::read(dest);
+            crate::ptr::write(dest, src);
+            result
+        }
+    }
+    // endregion:drop
+
+    // region:transmute
+    extern "rust-intrinsic" {
+        pub fn transmute<Src, Dst>(src: Src) -> Dst;
+    }
+    // endregion:transmute
+}
+
+pub mod ptr {
+    // region:drop
+    #[lang = "drop_in_place"]
+    pub unsafe fn drop_in_place<T: ?Sized>(to_drop: *mut T) {
+        unsafe { drop_in_place(to_drop) }
+    }
+    pub const unsafe fn read<T>(src: *const T) -> T {
+        *src
+    }
+    pub const unsafe fn write<T>(dst: *mut T, src: T) {
+        *dst = src;
+    }
+    // endregion:drop
 }
 
 pub mod ops {
@@ -308,12 +484,6 @@ pub mod ops {
     }
     pub use self::index::{Index, IndexMut};
     // endregion:index
-
-    // region:drop
-    pub mod mem {
-        pub fn drop<T>(_x: T) {}
-    }
-    // endregion:drop
 
     // region:range
     mod range {
@@ -467,12 +637,24 @@ pub mod ops {
         impl<B, C> Try for ControlFlow<B, C> {
             type Output = C;
             type Residual = ControlFlow<B, Infallible>;
-            fn from_output(output: Self::Output) -> Self {}
-            fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {}
+            fn from_output(output: Self::Output) -> Self {
+                ControlFlow::Continue(output)
+            }
+            fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
+                match self {
+                    ControlFlow::Continue(x) => ControlFlow::Continue(x),
+                    ControlFlow::Break(x) => ControlFlow::Break(ControlFlow::Break(x)),
+                }
+            }
         }
 
         impl<B, C> FromResidual for ControlFlow<B, C> {
-            fn from_residual(residual: ControlFlow<B, Infallible>) -> Self {}
+            fn from_residual(residual: ControlFlow<B, Infallible>) -> Self {
+                match residual {
+                    ControlFlow::Break(b) => ControlFlow::Break(b),
+                    ControlFlow::Continue(_) => loop {},
+                }
+            }
         }
         // region:option
         impl<T> Try for Option<T> {
@@ -493,6 +675,7 @@ pub mod ops {
             fn from_residual(x: Option<Infallible>) -> Self {
                 match x {
                     None => None,
+                    Some(_) => loop {},
                 }
             }
         }
@@ -521,6 +704,7 @@ pub mod ops {
             fn from_residual(residual: Result<Infallible, E>) -> Self {
                 match residual {
                     Err(e) => Err(From::from(e)),
+                    Ok(_) => loop {},
                 }
             }
         }
@@ -617,12 +801,114 @@ pub mod fmt {
     pub struct Error;
     pub type Result = Result<(), Error>;
     pub struct Formatter<'a>;
+    pub struct DebugTuple;
+    pub struct DebugStruct;
+    impl Formatter<'_> {
+        pub fn debug_tuple(&mut self, name: &str) -> DebugTuple {
+            DebugTuple
+        }
+
+        pub fn debug_struct(&mut self, name: &str) -> DebugStruct {
+            DebugStruct
+        }
+    }
+
+    impl DebugTuple {
+        pub fn field(&mut self, value: &dyn Debug) -> &mut Self {
+            self
+        }
+
+        pub fn finish(&mut self) -> Result {
+            Ok(())
+        }
+    }
+
+    impl DebugStruct {
+        pub fn field(&mut self, name: &str, value: &dyn Debug) -> &mut Self {
+            self
+        }
+
+        pub fn finish(&mut self) -> Result {
+            Ok(())
+        }
+    }
+
     pub trait Debug {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result;
     }
     pub trait Display {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result;
     }
+
+    extern "C" {
+        type Opaque;
+    }
+
+    #[lang = "format_argument"]
+    pub struct ArgumentV1<'a> {
+        value: &'a Opaque,
+        formatter: fn(&Opaque, &mut Formatter<'_>) -> Result,
+    }
+
+    impl<'a> ArgumentV1<'a> {
+        pub fn new<'b, T>(x: &'b T, f: fn(&T, &mut Formatter<'_>) -> Result) -> ArgumentV1<'b> {
+            use crate::mem::transmute;
+            unsafe { ArgumentV1 { formatter: transmute(f), value: transmute(x) } }
+        }
+    }
+
+    #[lang = "format_arguments"]
+    pub struct Arguments<'a> {
+        pieces: &'a [&'static str],
+        args: &'a [ArgumentV1<'a>],
+    }
+
+    impl<'a> Arguments<'a> {
+        pub const fn new_v1(
+            pieces: &'a [&'static str],
+            args: &'a [ArgumentV1<'a>],
+        ) -> Arguments<'a> {
+            Arguments { pieces, args }
+        }
+    }
+
+    // region:derive
+    #[rustc_builtin_macro]
+    pub macro Debug($item:item) {}
+    // endregion:derive
+
+    // region:builtin_impls
+    macro_rules! impl_debug {
+        ($($t:ty)*) => {
+            $(
+                impl const Debug for $t {
+                    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+                        Ok(())
+                    }
+                }
+            )*
+        }
+    }
+
+    impl_debug! {
+        usize u8 u16 u32 u64 u128
+        isize i8 i16 i32 i64 i128
+        f32 f64
+        bool char
+    }
+
+    impl<T: Debug> Debug for [T] {
+        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+            Ok(())
+        }
+    }
+
+    impl<T: Debug + ?Sized> Debug for &T {
+        fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+            (&**self).fmt(f)
+        }
+    }
+    // endregion:builtin_impls
 }
 // endregion:fmt
 
@@ -655,6 +941,13 @@ pub mod option {
             }
         }
 
+        pub const fn as_ref(&self) -> Option<&T> {
+            match self {
+                Some(x) => Some(x),
+                None => None,
+            }
+        }
+
         pub fn and<U>(self, optb: Option<U>) -> Option<U> {
             loop {}
         }
@@ -664,6 +957,14 @@ pub mod option {
                 None => default,
             }
         }
+        // region:result
+        pub const fn ok_or<E>(self, err: E) -> Result<T, E> {
+            match self {
+                Some(v) => Ok(v),
+                None => Err(err),
+            }
+        }
+        // endregion:result
         // region:fn
         pub fn and_then<U, F>(self, f: F) -> Option<U>
         where
@@ -834,8 +1135,6 @@ pub mod iter {
 
     mod traits {
         mod iterator {
-            use super::super::Take;
-
             pub trait Iterator {
                 type Item;
                 #[lang = "next"]
@@ -885,12 +1184,19 @@ pub mod iter {
                     self
                 }
             }
-            pub struct IntoIter<T, const N: usize>([T; N]);
+            struct IndexRange {
+                start: usize,
+                end: usize,
+            }
+            pub struct IntoIter<T, const N: usize> {
+                data: [T; N],
+                range: IndexRange,
+            }
             impl<T, const N: usize> IntoIterator for [T; N] {
                 type Item = T;
                 type IntoIter = IntoIter<T, N>;
                 fn into_iter(self) -> I {
-                    IntoIter(self)
+                    IntoIter { data: self, range: IndexRange { start: 0, end: loop {} } }
                 }
             }
             impl<T, const N: usize> Iterator for IntoIter<T, N> {
@@ -906,16 +1212,56 @@ pub mod iter {
 }
 // endregion:iterator
 
-// region:derive
+// region:panic
+mod panic {
+    pub macro panic_2021 {
+        ($($t:tt)+) => (
+            $crate::panicking::panic_fmt($crate::const_format_args!($($t)+))
+        ),
+    }
+}
+
+mod panicking {
+    #[lang = "panic_fmt"]
+    pub const fn panic_fmt(fmt: crate::fmt::Arguments<'_>) -> ! {
+        loop {}
+    }
+}
+// endregion:panic
+
 mod macros {
+    // region:panic
+    #[macro_export]
+    #[rustc_builtin_macro(std_panic)]
+    macro_rules! panic {
+        ($($arg:tt)*) => {
+            /* compiler built-in */
+        };
+    }
+
+    pub(crate) use panic;
+    // endregion:panic
+
+    // region:fmt
+    #[macro_export]
+    #[rustc_builtin_macro]
+    macro_rules! const_format_args {
+        ($fmt:expr) => {{ /* compiler built-in */ }};
+        ($fmt:expr, $($args:tt)*) => {{ /* compiler built-in */ }};
+    }
+
+    pub(crate) use const_format_args;
+    // endregion:fmt
+
+    // region:derive
     pub(crate) mod builtin {
         #[rustc_builtin_macro]
         pub macro derive($item:item) {
             /* compiler built-in */
         }
     }
+    // endregion:derive
 }
-// endregion:derive
 
 // region:non_zero
 pub mod num {
@@ -969,6 +1315,7 @@ pub mod prelude {
             ops::Drop,                          // :drop
             ops::{Fn, FnMut, FnOnce},           // :fn
             option::Option::{self, None, Some}, // :option
+            panic,                              // :panic
             result::Result::{self, Err, Ok},    // :result
         };
     }

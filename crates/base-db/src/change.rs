@@ -1,9 +1,10 @@
 //! Defines a unit of change that can applied to the database to get the next
 //! state. Changes are transactional.
 
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use salsa::Durability;
+use triomphe::Arc;
 use vfs::FileId;
 
 use crate::{CrateGraph, ProcMacros, SourceDatabaseExt, SourceRoot, SourceRootId};
@@ -12,7 +13,7 @@ use crate::{CrateGraph, ProcMacros, SourceDatabaseExt, SourceRoot, SourceRootId}
 #[derive(Default)]
 pub struct Change {
     pub roots: Option<Vec<SourceRoot>>,
-    pub files_changed: Vec<(FileId, Option<Arc<String>>)>,
+    pub files_changed: Vec<(FileId, Option<Arc<str>>)>,
     pub crate_graph: Option<CrateGraph>,
     pub proc_macros: Option<ProcMacros>,
 }
@@ -34,7 +35,7 @@ impl fmt::Debug for Change {
 }
 
 impl Change {
-    pub fn new() -> Change {
+    pub fn new() -> Self {
         Change::default()
     }
 
@@ -42,7 +43,7 @@ impl Change {
         self.roots = Some(roots);
     }
 
-    pub fn change_file(&mut self, file_id: FileId, new_text: Option<Arc<String>>) {
+    pub fn change_file(&mut self, file_id: FileId, new_text: Option<Arc<str>>) {
         self.files_changed.push((file_id, new_text))
     }
 
@@ -72,14 +73,14 @@ impl Change {
             let source_root = db.source_root(source_root_id);
             let durability = durability(&source_root);
             // XXX: can't actually remove the file, just reset the text
-            let text = text.unwrap_or_default();
+            let text = text.unwrap_or_else(|| Arc::from(""));
             db.set_file_text_with_durability(file_id, text, durability)
         }
         if let Some(crate_graph) = self.crate_graph {
-            db.set_crate_graph_with_durability(Arc::new(crate_graph), Durability::HIGH)
+            db.set_crate_graph_with_durability(Arc::new(crate_graph), Durability::HIGH);
         }
         if let Some(proc_macros) = self.proc_macros {
-            db.set_proc_macros_with_durability(Arc::new(proc_macros), Durability::HIGH)
+            db.set_proc_macros_with_durability(Arc::new(proc_macros), Durability::HIGH);
         }
     }
 }

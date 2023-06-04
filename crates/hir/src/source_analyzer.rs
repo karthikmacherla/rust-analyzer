@@ -5,21 +5,19 @@
 //!
 //! So, this modules should not be used during hir construction, it exists
 //! purely for "IDE needs".
-use std::{
-    iter::{self, once},
-    sync::Arc,
-};
+use std::iter::{self, once};
 
 use either::Either;
 use hir_def::{
     body::{
-        self,
         scope::{ExprScopes, ScopeId},
         Body, BodySourceMap,
     },
-    expr::{ExprId, Pat, PatId},
+    hir::{BindingId, ExprId, Pat, PatId},
     lang_item::LangItem,
+    lower::LowerCtx,
     macro_id_to_def_id,
+    nameres::MacroSubNs,
     path::{ModPath, Path, PathKind},
     resolver::{resolver_for_scope, Resolver, TypeNs, ValueNs},
     type_ref::Mutability,
@@ -49,6 +47,7 @@ use syntax::{
     ast::{self, AstNode},
     SyntaxKind, SyntaxNode, TextRange, TextSize,
 };
+use triomphe::Arc;
 
 use crate::{
     db::HirDatabase, semantics::PathResolution, Adt, AssocItem, BindingMode, BuiltinAttr,
@@ -135,13 +134,22 @@ impl SourceAnalyzer {
         self.body_source_map()?.node_pat(src)
     }
 
+    fn binding_id_of_pat(&self, pat: &ast::IdentPat) -> Option<BindingId> {
+        let pat_id = self.pat_id(&pat.clone().into())?;
+        if let Pat::Bind { id, .. } = self.body()?.pats[pat_id] {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
     fn expand_expr(
         &self,
         db: &dyn HirDatabase,
         expr: InFile<ast::MacroCall>,
     ) -> Option<InFile<ast::Expr>> {
         let macro_file = self.body_source_map()?.node_macro_file(expr.as_ref())?;
-        let expanded = db.parse_or_expand(macro_file)?;
+        let expanded = db.parse_or_expand(macro_file);
         let res = if let Some(stmts) = ast::MacroStmts::cast(expanded.clone()) {
             match stmts.expr()? {
                 ast::Expr::MacroExpr(mac) => {
@@ -200,6 +208,18 @@ impl SourceAnalyzer {
         Some((mk_ty(ty), coerced.map(mk_ty)))
     }
 
+    pub(crate) fn type_of_binding_in_pat(
+        &self,
+        db: &dyn HirDatabase,
+        pat: &ast::IdentPat,
+    ) -> Option<Type> {
+        let binding_id = self.binding_id_of_pat(pat)?;
+        let infer = self.infer.as_ref()?;
+        let ty = infer[binding_id].clone();
+        let mk_ty = |ty| Type::new_with_resolver(db, &self.resolver, ty);
+        Some(mk_ty(ty))
+    }
+
     pub(crate) fn type_of_self(
         &self,
         db: &dyn HirDatabase,
@@ -216,9 +236,9 @@ impl SourceAnalyzer {
         _db: &dyn HirDatabase,
         pat: &ast::IdentPat,
     ) -> Option<BindingMode> {
-        let pat_id = self.pat_id(&pat.clone().into())?;
+        let binding_id = self.binding_id_of_pat(pat)?;
         let infer = self.infer.as_ref()?;
-        infer.pat_binding_modes.get(&pat_id).map(|bm| match bm {
+        infer.binding_modes.get(binding_id).map(|bm| match bm {
             hir_ty::BindingMode::Move => BindingMode::Move,
             hir_ty::BindingMode::Ref(hir_ty::Mutability::Mut) => BindingMode::Ref(Mutability::Mut),
             hir_ty::BindingMode::Ref(hir_ty::Mutability::Not) => {
@@ -463,9 +483,11 @@ impl SourceAnalyzer {
         db: &dyn HirDatabase,
         macro_call: InFile<&ast::MacroCall>,
     ) -> Option<Macro> {
-        let ctx = body::LowerCtx::new(db.upcast(), macro_call.file_id);
+        let ctx = LowerCtx::with_file_id(db.upcast(), macro_call.file_id);
         let path = macro_call.value.path().and_then(|ast| Path::from_src(ast, &ctx))?;
-        self.resolver.resolve_path_as_macro(db.upcast(), path.mod_path()?).map(|it| it.into())
+        self.resolver
+            .resolve_path_as_macro(db.upcast(), path.mod_path()?, Some(MacroSubNs::Bang))
+            .map(|it| it.into())
     }
 
     pub(crate) fn resolve_bind_pat_to_const(
@@ -575,7 +597,7 @@ impl SourceAnalyzer {
 
         // This must be a normal source file rather than macro file.
         let hygiene = Hygiene::new(db.upcast(), self.file_id);
-        let ctx = body::LowerCtx::with_hygiene(db.upcast(), &hygiene);
+        let ctx = LowerCtx::with_hygiene(db.upcast(), &hygiene);
         let hir_path = Path::from_src(path.clone(), &ctx)?;
 
         // Case where path is a qualifier of a use tree, e.g. foo::bar::{Baz, Qux} where we are
@@ -659,7 +681,7 @@ impl SourceAnalyzer {
                     }
                 }
             }
-            return match resolve_hir_path_as_macro(db, &self.resolver, &hir_path) {
+            return match resolve_hir_path_as_attr_macro(db, &self.resolver, &hir_path) {
                 Some(m) => Some(PathResolution::Def(ModuleDef::Macro(m))),
                 // this labels any path that starts with a tool module as the tool itself, this is technically wrong
                 // but there is no benefit in differentiating these two cases for the time being
@@ -737,7 +759,7 @@ impl SourceAnalyzer {
         let krate = self.resolver.krate();
         let macro_call_id = macro_call.as_call_id(db.upcast(), krate, |path| {
             self.resolver
-                .resolve_path_as_macro(db.upcast(), &path)
+                .resolve_path_as_macro(db.upcast(), &path, Some(MacroSubNs::Bang))
                 .map(|it| macro_id_to_def_id(db.upcast(), it))
         })?;
         Some(macro_call_id.as_file()).filter(|it| it.expansion_level(db.upcast()) < 64)
@@ -937,12 +959,14 @@ pub(crate) fn resolve_hir_path(
 }
 
 #[inline]
-pub(crate) fn resolve_hir_path_as_macro(
+pub(crate) fn resolve_hir_path_as_attr_macro(
     db: &dyn HirDatabase,
     resolver: &Resolver,
     path: &Path,
 ) -> Option<Macro> {
-    resolver.resolve_path_as_macro(db.upcast(), path.mod_path()?).map(Into::into)
+    resolver
+        .resolve_path_as_macro(db.upcast(), path.mod_path()?, Some(MacroSubNs::Attr))
+        .map(Into::into)
 }
 
 fn resolve_hir_path_(
@@ -1041,7 +1065,7 @@ fn resolve_hir_path_(
 
     let macros = || {
         resolver
-            .resolve_path_as_macro(db.upcast(), path.mod_path()?)
+            .resolve_path_as_macro(db.upcast(), path.mod_path()?, None)
             .map(|def| PathResolution::Def(ModuleDef::Macro(def.into())))
     };
 

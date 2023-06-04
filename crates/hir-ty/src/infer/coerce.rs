@@ -5,14 +5,15 @@
 //! See <https://doc.rust-lang.org/nomicon/coercions.html> and
 //! `rustc_hir_analysis/check/coercion.rs`.
 
-use std::{iter, sync::Arc};
+use std::iter;
 
-use chalk_ir::{cast::Cast, BoundVar, Goal, Mutability, TyVariableKind};
+use chalk_ir::{cast::Cast, BoundVar, Goal, Mutability, TyKind, TyVariableKind};
 use hir_def::{
-    expr::ExprId,
+    hir::ExprId,
     lang_item::{LangItem, LangItemTarget},
 };
 use stdx::always;
+use triomphe::Arc;
 
 use crate::{
     autoderef::{Autoderef, AutoderefKind},
@@ -21,8 +22,10 @@ use crate::{
         Adjust, Adjustment, AutoBorrow, InferOk, InferenceContext, OverloadedDeref, PointerCast,
         TypeError, TypeMismatch,
     },
-    static_lifetime, Canonical, DomainGoal, FnPointer, FnSig, Guidance, InEnvironment, Interner,
-    Solution, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt, TyKind,
+    static_lifetime,
+    utils::ClosureSubst,
+    Canonical, DomainGoal, FnPointer, FnSig, Guidance, InEnvironment, Interner, Solution,
+    Substitution, TraitEnvironment, Ty, TyBuilder, TyExt,
 };
 
 use super::unify::InferenceTable;
@@ -45,6 +48,13 @@ fn success(
     goals: Vec<InEnvironment<Goal<Interner>>>,
 ) -> CoerceResult {
     Ok(InferOk { goals, value: (adj, target) })
+}
+
+pub(super) enum CoercionCause {
+    // FIXME: Make better use of this. Right now things like return and break without a value
+    // use it to point to themselves, causing us to report a mismatch on those expressions even
+    // though technically they themselves are `!`
+    Expr(ExprId),
 }
 
 #[derive(Clone, Debug)]
@@ -87,8 +97,12 @@ impl CoerceMany {
         }
     }
 
-    pub(super) fn coerce_forced_unit(&mut self, ctx: &mut InferenceContext<'_>) {
-        self.coerce(ctx, None, &ctx.result.standard_types.unit.clone())
+    pub(super) fn coerce_forced_unit(
+        &mut self,
+        ctx: &mut InferenceContext<'_>,
+        cause: CoercionCause,
+    ) {
+        self.coerce(ctx, None, &ctx.result.standard_types.unit.clone(), cause)
     }
 
     /// Merge two types from different branches, with possible coercion.
@@ -103,6 +117,7 @@ impl CoerceMany {
         ctx: &mut InferenceContext<'_>,
         expr: Option<ExprId>,
         expr_ty: &Ty,
+        cause: CoercionCause,
     ) {
         let expr_ty = ctx.resolve_ty_shallow(expr_ty);
         self.expected_ty = ctx.resolve_ty_shallow(&self.expected_ty);
@@ -111,6 +126,8 @@ impl CoerceMany {
         // pointers to have a chance at getting a match. See
         // https://github.com/rust-lang/rust/blob/7b805396bf46dce972692a6846ce2ad8481c5f85/src/librustc_typeck/check/coercion.rs#L877-L916
         let sig = match (self.merged_ty().kind(Interner), expr_ty.kind(Interner)) {
+            (TyKind::FnDef(x, _), TyKind::FnDef(y, _)) if x == y => None,
+            (TyKind::Closure(x, _), TyKind::Closure(y, _)) if x == y => None,
             (TyKind::FnDef(..) | TyKind::Closure(..), TyKind::FnDef(..) | TyKind::Closure(..)) => {
                 // FIXME: we're ignoring safety here. To be more correct, if we have one FnDef and one Closure,
                 // we should be coercing the closure to a fn pointer of the safety of the FnDef
@@ -148,11 +165,13 @@ impl CoerceMany {
         } else if let Ok(res) = ctx.coerce(expr, &self.merged_ty(), &expr_ty) {
             self.final_ty = Some(res);
         } else {
-            if let Some(id) = expr {
-                ctx.result.type_mismatches.insert(
-                    id.into(),
-                    TypeMismatch { expected: self.merged_ty(), actual: expr_ty.clone() },
-                );
+            match cause {
+                CoercionCause::Expr(id) => {
+                    ctx.result.type_mismatches.insert(
+                        id.into(),
+                        TypeMismatch { expected: self.merged_ty(), actual: expr_ty.clone() },
+                    );
+                }
             }
             cov_mark::hit!(coerce_merge_fail_fallback);
         }
@@ -668,7 +687,7 @@ impl<'a> InferenceTable<'a> {
 }
 
 fn coerce_closure_fn_ty(closure_substs: &Substitution, safety: chalk_ir::Safety) -> Ty {
-    let closure_sig = closure_substs.at(Interner, 0).assert_ty_ref(Interner).clone();
+    let closure_sig = ClosureSubst(closure_substs).sig_ty().clone();
     match closure_sig.kind(Interner) {
         TyKind::Function(fn_ty) => TyKind::Function(FnPointer {
             num_binders: fn_ty.num_binders,

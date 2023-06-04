@@ -18,7 +18,8 @@ pub(crate) fn need_mut(ctx: &DiagnosticsContext<'_>, d: &hir::NeedMut) -> Diagno
         let use_range = d.span.value.text_range();
         for source in d.local.sources(ctx.sema.db) {
             let Some(ast) = source.name() else { continue };
-            edit_builder.insert(ast.syntax().text_range().start(), "mut ".to_string());
+            // FIXME: macros
+            edit_builder.insert(ast.value.syntax().text_range().start(), "mut ".to_string());
         }
         let edit = edit_builder.finish();
         Some(vec![fix(
@@ -30,7 +31,10 @@ pub(crate) fn need_mut(ctx: &DiagnosticsContext<'_>, d: &hir::NeedMut) -> Diagno
     })();
     Diagnostic::new(
         "need-mut",
-        format!("cannot mutate immutable variable `{}`", d.local.name(ctx.sema.db)),
+        format!(
+            "cannot mutate immutable variable `{}`",
+            d.local.name(ctx.sema.db).display(ctx.sema.db)
+        ),
         ctx.sema.diagnostics_display_range(d.span.clone()).range,
     )
     .with_fixes(fixes)
@@ -340,11 +344,38 @@ fn main() {
     fn regression_14310() {
         check_diagnostics(
             r#"
+            //- minicore: copy, builtin_impls
             fn clone(mut i: &!) -> ! {
                    //^^^^^ 💡 weak: variable does not need to be mutable
                 *i
             }
         "#,
+        );
+    }
+
+    #[test]
+    fn match_closure_capture() {
+        check_diagnostics(
+            r#"
+//- minicore: option
+fn main() {
+    let mut v = &mut Some(2);
+      //^^^^^ 💡 weak: variable does not need to be mutable
+    let _ = || match v {
+        Some(k) => {
+            *k = 5;
+        }
+        None => {}
+    };
+    let v = &mut Some(2);
+    let _ = || match v {
+                   //^ 💡 error: cannot mutate immutable variable `v`
+        ref mut k => {
+            *k = &mut Some(5);
+        }
+    };
+}
+"#,
         );
     }
 
@@ -368,7 +399,7 @@ fn main() {
     #[test]
     fn mutation_in_dead_code() {
         // This one is interesting. Dead code is not represented at all in the MIR, so
-        // there would be no mutablility error for locals in dead code. Rustc tries to
+        // there would be no mutability error for locals in dead code. Rustc tries to
         // not emit `unused_mut` in this case, but since it works without `mut`, and
         // special casing it is not trivial, we emit it.
         check_diagnostics(
@@ -541,6 +572,15 @@ fn f(mut x: i32) {
         check_diagnostics(
             r#"
 fn f(x: i32) {
+   x = 5;
+ //^^^^^ 💡 error: cannot mutate immutable variable `x`
+}
+"#,
+        );
+        check_diagnostics(
+            r#"
+fn f((x, y): (i32, i32)) {
+    let t = [0; 2];
    x = 5;
  //^^^^^ 💡 error: cannot mutate immutable variable `x`
 }
@@ -766,6 +806,134 @@ fn fn_borrow_mut(mut x: &mut impl FnMut(u8) -> u8) -> u8 {
 fn fn_once(mut x: impl FnOnce(u8) -> u8) -> u8 {
          //^^^^^ 💡 weak: variable does not need to be mutable
     x(2)
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn closure() {
+        // FIXME: Diagnostic spans are inconsistent inside and outside closure
+        check_diagnostics(
+            r#"
+        //- minicore: copy, fn
+        struct X;
+
+        impl X {
+            fn mutate(&mut self) {}
+        }
+
+        fn f() {
+            let x = 5;
+            let closure1 = || { x = 2; };
+                              //^ 💡 error: cannot mutate immutable variable `x`
+            let _ = closure1();
+                  //^^^^^^^^ 💡 error: cannot mutate immutable variable `closure1`
+            let closure2 = || { x = x; };
+                              //^ 💡 error: cannot mutate immutable variable `x`
+            let closure3 = || {
+                let x = 2;
+                x = 5;
+              //^^^^^ 💡 error: cannot mutate immutable variable `x`
+                x
+            };
+            let x = X;
+            let closure4 = || { x.mutate(); };
+                              //^ 💡 error: cannot mutate immutable variable `x`
+        }
+                    "#,
+        );
+        check_diagnostics(
+            r#"
+        //- minicore: copy, fn
+        fn f() {
+            let mut x = 5;
+              //^^^^^ 💡 weak: variable does not need to be mutable
+            let mut y = 2;
+            y = 7;
+            let closure = || {
+                let mut z = 8;
+                z = 3;
+                let mut k = z;
+                  //^^^^^ 💡 weak: variable does not need to be mutable
+            };
+        }
+                    "#,
+        );
+        check_diagnostics(
+            r#"
+//- minicore: copy, fn
+fn f() {
+    let closure = || {
+        || {
+            || {
+                let x = 2;
+                || { || { x = 5; } }
+                        //^ 💡 error: cannot mutate immutable variable `x`
+            }
+        }
+    };
+}
+            "#,
+        );
+        check_diagnostics(
+            r#"
+//- minicore: copy, fn
+fn f() {
+    struct X;
+    let mut x = X;
+      //^^^^^ 💡 weak: variable does not need to be mutable
+    let c1 = || x;
+    let mut x = X;
+    let c2 = || { x = X; x };
+    let mut x = X;
+    let c2 = move || { x = X; };
+}
+            "#,
+        );
+        check_diagnostics(
+            r#"
+        //- minicore: copy, fn, deref_mut
+        struct X(i32, i64);
+
+        fn f() {
+            let mut x = &mut 5;
+              //^^^^^ 💡 weak: variable does not need to be mutable
+            let closure1 = || { *x = 2; };
+            let _ = closure1();
+                  //^^^^^^^^ 💡 error: cannot mutate immutable variable `closure1`
+            let mut x = &mut 5;
+              //^^^^^ 💡 weak: variable does not need to be mutable
+            let closure1 = || { *x = 2; &x; };
+            let _ = closure1();
+                  //^^^^^^^^ 💡 error: cannot mutate immutable variable `closure1`
+            let mut x = &mut 5;
+            let closure1 = || { *x = 2; &x; x = &mut 3; };
+            let _ = closure1();
+                  //^^^^^^^^ 💡 error: cannot mutate immutable variable `closure1`
+            let mut x = &mut 5;
+              //^^^^^ 💡 weak: variable does not need to be mutable
+            let closure1 = move || { *x = 2; };
+            let _ = closure1();
+                  //^^^^^^^^ 💡 error: cannot mutate immutable variable `closure1`
+            let mut x = &mut X(1, 2);
+              //^^^^^ 💡 weak: variable does not need to be mutable
+            let closure1 = || { x.0 = 2; };
+            let _ = closure1();
+                  //^^^^^^^^ 💡 error: cannot mutate immutable variable `closure1`
+        }
+                    "#,
+        );
+    }
+
+    #[test]
+    fn allow_unused_mut_for_identifiers_starting_with_underline() {
+        check_diagnostics(
+            r#"
+fn f(_: i32) {}
+fn main() {
+    let mut _x = 2;
+    f(_x);
 }
 "#,
         );

@@ -13,7 +13,6 @@ pub mod famous_defs;
 pub mod helpers;
 pub mod items_locator;
 pub mod label;
-pub mod line_index;
 pub mod path_transform;
 pub mod rename;
 pub mod rust_doc;
@@ -43,20 +42,19 @@ pub mod syntax_helpers {
     pub use parser::LexedStr;
 }
 
-use std::{fmt, mem::ManuallyDrop, sync::Arc};
+use std::{fmt, mem::ManuallyDrop};
 
 use base_db::{
     salsa::{self, Durability},
     AnchoredPath, CrateId, FileId, FileLoader, FileLoaderDelegate, SourceDatabase, Upcast,
 };
-use hir::{
-    db::{DefDatabase, ExpandDatabase, HirDatabase},
-    symbols::FileSymbolKind,
-};
-use stdx::hash::NoHashHashSet;
+use hir::db::{DefDatabase, ExpandDatabase, HirDatabase};
+use triomphe::Arc;
 
 use crate::{line_index::LineIndex, symbol_index::SymbolsDatabase};
 pub use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+
+pub use ::line_index;
 
 /// `base_db` is normally also needed in places where `ide_db` is used, so this re-export is for convenience.
 pub use base_db;
@@ -114,13 +112,13 @@ impl Upcast<dyn HirDatabase> for RootDatabase {
 }
 
 impl FileLoader for RootDatabase {
-    fn file_text(&self, file_id: FileId) -> Arc<String> {
+    fn file_text(&self, file_id: FileId) -> Arc<str> {
         FileLoaderDelegate(self).file_text(file_id)
     }
     fn resolve_path(&self, path: AnchoredPath<'_>) -> Option<FileId> {
         FileLoaderDelegate(self).resolve_path(path)
     }
-    fn relevant_crates(&self, file_id: FileId) -> Arc<NoHashHashSet<CrateId>> {
+    fn relevant_crates(&self, file_id: FileId) -> Arc<FxHashSet<CrateId>> {
         FileLoaderDelegate(self).relevant_crates(file_id)
     }
 }
@@ -150,29 +148,33 @@ impl RootDatabase {
     }
 
     pub fn update_parse_query_lru_capacity(&mut self, lru_capacity: Option<usize>) {
-        let lru_capacity = lru_capacity.unwrap_or(base_db::DEFAULT_LRU_CAP);
+        let lru_capacity = lru_capacity.unwrap_or(base_db::DEFAULT_PARSE_LRU_CAP);
         base_db::ParseQuery.in_db_mut(self).set_lru_capacity(lru_capacity);
-        hir::db::ParseMacroExpansionQuery.in_db_mut(self).set_lru_capacity(lru_capacity);
-        hir::db::MacroExpandQuery.in_db_mut(self).set_lru_capacity(lru_capacity);
+        // macro expansions are usually rather small, so we can afford to keep more of them alive
+        hir::db::ParseMacroExpansionQuery.in_db_mut(self).set_lru_capacity(4 * lru_capacity);
+        hir::db::MacroExpandQuery.in_db_mut(self).set_lru_capacity(4 * lru_capacity);
     }
 
     pub fn update_lru_capacities(&mut self, lru_capacities: &FxHashMap<Box<str>, usize>) {
         use hir::db as hir_db;
 
         base_db::ParseQuery.in_db_mut(self).set_lru_capacity(
-            lru_capacities.get(stringify!(ParseQuery)).copied().unwrap_or(base_db::DEFAULT_LRU_CAP),
+            lru_capacities
+                .get(stringify!(ParseQuery))
+                .copied()
+                .unwrap_or(base_db::DEFAULT_PARSE_LRU_CAP),
         );
         hir_db::ParseMacroExpansionQuery.in_db_mut(self).set_lru_capacity(
             lru_capacities
                 .get(stringify!(ParseMacroExpansionQuery))
                 .copied()
-                .unwrap_or(base_db::DEFAULT_LRU_CAP),
+                .unwrap_or(4 * base_db::DEFAULT_PARSE_LRU_CAP),
         );
         hir_db::MacroExpandQuery.in_db_mut(self).set_lru_capacity(
             lru_capacities
                 .get(stringify!(MacroExpandQuery))
                 .copied()
-                .unwrap_or(base_db::DEFAULT_LRU_CAP),
+                .unwrap_or(4 * base_db::DEFAULT_PARSE_LRU_CAP),
         );
 
         macro_rules! update_lru_capacity_per_query {
@@ -202,8 +204,8 @@ impl RootDatabase {
             hir_db::MacroDefQuery
             // hir_db::MacroExpandQuery
             hir_db::ExpandProcMacroQuery
-            hir_db::MacroExpandErrorQuery
             hir_db::HygieneFrameQuery
+            hir_db::ParseMacroExpansionErrorQuery
 
             // DefDatabase
             hir_db::FileItemTreeQuery
@@ -375,20 +377,22 @@ impl From<hir::MacroKind> for SymbolKind {
     }
 }
 
-impl From<FileSymbolKind> for SymbolKind {
-    fn from(it: FileSymbolKind) -> Self {
+impl From<hir::ModuleDefId> for SymbolKind {
+    fn from(it: hir::ModuleDefId) -> Self {
         match it {
-            FileSymbolKind::Const => SymbolKind::Const,
-            FileSymbolKind::Enum => SymbolKind::Enum,
-            FileSymbolKind::Function => SymbolKind::Function,
-            FileSymbolKind::Macro => SymbolKind::Macro,
-            FileSymbolKind::Module => SymbolKind::Module,
-            FileSymbolKind::Static => SymbolKind::Static,
-            FileSymbolKind::Struct => SymbolKind::Struct,
-            FileSymbolKind::Trait => SymbolKind::Trait,
-            FileSymbolKind::TraitAlias => SymbolKind::TraitAlias,
-            FileSymbolKind::TypeAlias => SymbolKind::TypeAlias,
-            FileSymbolKind::Union => SymbolKind::Union,
+            hir::ModuleDefId::ConstId(..) => SymbolKind::Const,
+            hir::ModuleDefId::EnumVariantId(..) => SymbolKind::Variant,
+            hir::ModuleDefId::FunctionId(..) => SymbolKind::Function,
+            hir::ModuleDefId::MacroId(..) => SymbolKind::Macro,
+            hir::ModuleDefId::ModuleId(..) => SymbolKind::Module,
+            hir::ModuleDefId::StaticId(..) => SymbolKind::Static,
+            hir::ModuleDefId::AdtId(hir::AdtId::StructId(..)) => SymbolKind::Struct,
+            hir::ModuleDefId::AdtId(hir::AdtId::EnumId(..)) => SymbolKind::Enum,
+            hir::ModuleDefId::AdtId(hir::AdtId::UnionId(..)) => SymbolKind::Union,
+            hir::ModuleDefId::TraitId(..) => SymbolKind::Trait,
+            hir::ModuleDefId::TraitAliasId(..) => SymbolKind::TraitAlias,
+            hir::ModuleDefId::TypeAliasId(..) => SymbolKind::TypeAlias,
+            hir::ModuleDefId::BuiltinType(..) => SymbolKind::TypeAlias,
         }
     }
 }
@@ -411,4 +415,5 @@ impl SnippetCap {
 #[cfg(test)]
 mod tests {
     mod sourcegen_lints;
+    mod line_index;
 }

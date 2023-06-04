@@ -1,9 +1,6 @@
 //! Database used for testing `hir_def`.
 
-use std::{
-    fmt, panic,
-    sync::{Arc, Mutex},
-};
+use std::{fmt, panic, sync::Mutex};
 
 use base_db::{
     salsa::{self, Durability},
@@ -11,8 +8,9 @@ use base_db::{
     Upcast,
 };
 use hir_expand::{db::ExpandDatabase, InFile};
-use stdx::hash::NoHashHashSet;
+use rustc_hash::FxHashSet;
 use syntax::{algo, ast, AstNode};
+use triomphe::Arc;
 
 use crate::{
     db::DefDatabase,
@@ -71,13 +69,13 @@ impl fmt::Debug for TestDB {
 impl panic::RefUnwindSafe for TestDB {}
 
 impl FileLoader for TestDB {
-    fn file_text(&self, file_id: FileId) -> Arc<String> {
+    fn file_text(&self, file_id: FileId) -> Arc<str> {
         FileLoaderDelegate(self).file_text(file_id)
     }
     fn resolve_path(&self, path: AnchoredPath<'_>) -> Option<FileId> {
         FileLoaderDelegate(self).resolve_path(path)
     }
-    fn relevant_crates(&self, file_id: FileId) -> Arc<NoHashHashSet<CrateId>> {
+    fn relevant_crates(&self, file_id: FileId) -> Arc<FxHashSet<CrateId>> {
         FileLoaderDelegate(self).relevant_crates(file_id)
     }
 }
@@ -112,7 +110,7 @@ impl TestDB {
                 }
                 _ => {
                     // FIXME: handle `mod` inside block expression
-                    return def_map.module_id(def_map.root());
+                    return def_map.module_id(DefMap::ROOT);
                 }
             }
         }
@@ -121,7 +119,7 @@ impl TestDB {
     /// Finds the smallest/innermost module in `def_map` containing `position`.
     fn mod_at_position(&self, def_map: &DefMap, position: FilePosition) -> LocalModuleId {
         let mut size = None;
-        let mut res = def_map.root();
+        let mut res = DefMap::ROOT;
         for (module, data) in def_map.modules() {
             let src = data.definition_source(self);
             if src.file_id != position.file_id.into() {
@@ -210,13 +208,11 @@ impl TestDB {
             });
 
         for scope in scope_iter {
-            let containing_blocks =
+            let mut containing_blocks =
                 scopes.scope_chain(Some(scope)).filter_map(|scope| scopes.block(scope));
 
-            for block in containing_blocks {
-                if let Some(def_map) = self.block_def_map(block) {
-                    return Some(def_map);
-                }
+            if let Some(block) = containing_blocks.next().map(|block| self.block_def_map(block)) {
+                return Some(block);
             }
         }
 

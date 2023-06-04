@@ -3,7 +3,7 @@
 
 use chalk_ir::Mutability;
 use hir_def::{
-    expr::{Array, BindingAnnotation, Expr, ExprId, PatId, Statement, UnaryOp},
+    hir::{Array, BinaryOp, BindingAnnotation, Expr, ExprId, PatId, Statement, UnaryOp},
     lang_item::LangItem,
 };
 use hir_expand::name;
@@ -42,10 +42,13 @@ impl<'a> InferenceContext<'a> {
                     self.infer_mut_expr(else_branch, Mutability::Not);
                 }
             }
+            Expr::Const(id) => {
+                let (_, expr) = self.db.lookup_intern_anonymous_const(*id);
+                self.infer_mut_expr(expr, Mutability::Not);
+            }
             Expr::Let { pat, expr } => self.infer_mut_expr(*expr, self.pat_bound_mutability(*pat)),
             Expr::Block { id: _, statements, tail, label: _ }
             | Expr::Async { id: _, statements, tail }
-            | Expr::Const { id: _, statements, tail }
             | Expr::Unsafe { id: _, statements, tail } => {
                 for st in statements.iter() {
                     match st {
@@ -66,8 +69,7 @@ impl<'a> InferenceContext<'a> {
                     self.infer_mut_expr(*tail, Mutability::Not);
                 }
             }
-            &Expr::For { iterable: c, pat: _, body, label: _ }
-            | &Expr::While { condition: c, body, label: _ } => {
+            &Expr::While { condition: c, body, label: _ } => {
                 self.infer_mut_expr(c, Mutability::Not);
                 self.infer_mut_expr(body, Mutability::Not);
             }
@@ -80,6 +82,9 @@ impl<'a> InferenceContext<'a> {
                 self.infer_mut_expr(*expr, m);
                 for arm in arms.iter() {
                     self.infer_mut_expr(arm.expr, Mutability::Not);
+                    if let Some(g) = arm.guard {
+                        self.infer_mut_expr(g, Mutability::Not);
+                    }
                 }
             }
             Expr::Yield { expr }
@@ -158,14 +163,19 @@ impl<'a> InferenceContext<'a> {
                 let mutability = lower_to_chalk_mutability(*mutability);
                 self.infer_mut_expr(*expr, mutability);
             }
+            Expr::BinaryOp { lhs, rhs, op: Some(BinaryOp::Assignment { .. }) } => {
+                self.infer_mut_expr(*lhs, Mutability::Mut);
+                self.infer_mut_expr(*rhs, Mutability::Not);
+            }
             Expr::Array(Array::Repeat { initializer: lhs, repeat: rhs })
             | Expr::BinaryOp { lhs, rhs, op: _ }
             | Expr::Range { lhs: Some(lhs), rhs: Some(rhs), range_type: _ } => {
                 self.infer_mut_expr(*lhs, Mutability::Not);
                 self.infer_mut_expr(*rhs, Mutability::Not);
             }
-            // not implemented
-            Expr::Closure { .. } => (),
+            Expr::Closure { body, .. } => {
+                self.infer_mut_expr(*body, Mutability::Not);
+            }
             Expr::Tuple { exprs, is_assignee_expr: _ }
             | Expr::Array(Array::ElementList { elements: exprs, is_assignee_expr: _ }) => {
                 self.infer_mut_not_expr_iter(exprs.iter().copied());

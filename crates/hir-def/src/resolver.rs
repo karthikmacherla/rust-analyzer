@@ -1,5 +1,5 @@
 //! Name resolution façade.
-use std::{fmt, hash::BuildHasherDefault, sync::Arc};
+use std::{fmt, hash::BuildHasherDefault};
 
 use base_db::CrateId;
 use hir_expand::name::{name, Name};
@@ -7,16 +7,17 @@ use indexmap::IndexMap;
 use intern::Interned;
 use rustc_hash::FxHashSet;
 use smallvec::{smallvec, SmallVec};
+use triomphe::Arc;
 
 use crate::{
     body::scope::{ExprScopes, ScopeId},
     builtin_type::BuiltinType,
     db::DefDatabase,
-    expr::{BindingId, ExprId, LabelId},
     generics::{GenericParams, TypeOrConstParamData},
+    hir::{BindingId, ExprId, LabelId},
     item_scope::{BuiltinShadowMode, BUILTIN_SCOPE},
     lang_item::LangItemTarget,
-    nameres::DefMap,
+    nameres::{DefMap, MacroSubNs},
     path::{ModPath, Path, PathKind},
     per_ns::PerNs,
     visibility::{RawVisibility, Visibility},
@@ -79,7 +80,7 @@ enum Scope {
     ExprScope(ExprScope),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeNs {
     SelfType(ImplId),
     GenericParam(TypeParamId),
@@ -154,7 +155,8 @@ impl Resolver {
         path: &ModPath,
     ) -> Option<PerNs> {
         let (item_map, module) = self.item_scope();
-        let (module_res, idx) = item_map.resolve_path(db, module, path, BuiltinShadowMode::Module);
+        let (module_res, idx) =
+            item_map.resolve_path(db, module, path, BuiltinShadowMode::Module, None);
         match module_res.take_types()? {
             ModuleDefId::TraitId(it) => {
                 let idx = idx?;
@@ -384,9 +386,17 @@ impl Resolver {
         }
     }
 
-    pub fn resolve_path_as_macro(&self, db: &dyn DefDatabase, path: &ModPath) -> Option<MacroId> {
+    pub fn resolve_path_as_macro(
+        &self,
+        db: &dyn DefDatabase,
+        path: &ModPath,
+        expected_macro_kind: Option<MacroSubNs>,
+    ) -> Option<MacroId> {
         let (item_map, module) = self.item_scope();
-        item_map.resolve_path(db, module, path, BuiltinShadowMode::Other).0.take_macros()
+        item_map
+            .resolve_path(db, module, path, BuiltinShadowMode::Other, expected_macro_kind)
+            .0
+            .take_macros()
     }
 
     /// Returns a set of names available in the current scope.
@@ -451,7 +461,10 @@ impl Resolver {
                 res.add(name, ScopeDef::ModuleDef(ModuleDefId::MacroId(mac)));
             })
         });
-        def_map.extern_prelude().for_each(|(name, &def)| {
+        def_map.macro_use_prelude().for_each(|(name, def)| {
+            res.add(name, ScopeDef::ModuleDef(def.into()));
+        });
+        def_map.extern_prelude().for_each(|(name, def)| {
             res.add(name, ScopeDef::ModuleDef(ModuleDefId::ModuleId(def)));
         });
         BUILTIN_SCOPE.iter().for_each(|(name, &def)| {
@@ -572,15 +585,13 @@ impl Resolver {
                 scope_id,
             }));
             if let Some(block) = expr_scopes.block(scope_id) {
-                if let Some(def_map) = db.block_def_map(block) {
-                    let root = def_map.root();
-                    resolver
-                        .scopes
-                        .push(Scope::BlockScope(ModuleItemMap { def_map, module_id: root }));
-                    // FIXME: This adds as many module scopes as there are blocks, but resolving in each
-                    // already traverses all parents, so this is O(n²). I think we could only store the
-                    // innermost module scope instead?
-                }
+                let def_map = db.block_def_map(block);
+                resolver
+                    .scopes
+                    .push(Scope::BlockScope(ModuleItemMap { def_map, module_id: DefMap::ROOT }));
+                // FIXME: This adds as many module scopes as there are blocks, but resolving in each
+                // already traverses all parents, so this is O(n²). I think we could only store the
+                // innermost module scope instead?
             }
         }
 
@@ -628,7 +639,8 @@ impl Resolver {
         shadow: BuiltinShadowMode,
     ) -> PerNs {
         let (item_map, module) = self.item_scope();
-        let (module_res, segment_index) = item_map.resolve_path(db, module, path, shadow);
+        // This method resolves `path` just like import paths, so no expected macro subns is given.
+        let (module_res, segment_index) = item_map.resolve_path(db, module, path, shadow, None);
         if segment_index.is_some() {
             return PerNs::none();
         }
@@ -741,13 +753,11 @@ fn resolver_for_scope_(
 
     for scope in scope_chain.into_iter().rev() {
         if let Some(block) = scopes.block(scope) {
-            if let Some(def_map) = db.block_def_map(block) {
-                let root = def_map.root();
-                r = r.push_block_scope(def_map, root);
-                // FIXME: This adds as many module scopes as there are blocks, but resolving in each
-                // already traverses all parents, so this is O(n²). I think we could only store the
-                // innermost module scope instead?
-            }
+            let def_map = db.block_def_map(block);
+            r = r.push_block_scope(def_map, DefMap::ROOT);
+            // FIXME: This adds as many module scopes as there are blocks, but resolving in each
+            // already traverses all parents, so this is O(n²). I think we could only store the
+            // innermost module scope instead?
         }
 
         r = r.push_expr_scope(owner, Arc::clone(&scopes), scope);
@@ -1033,6 +1043,12 @@ impl HasResolver for GenericDefId {
             GenericDefId::EnumVariantId(inner) => inner.parent.resolver(db),
             GenericDefId::ConstId(inner) => inner.resolver(db),
         }
+    }
+}
+
+impl HasResolver for EnumVariantId {
+    fn resolver(self, db: &dyn DefDatabase) -> Resolver {
+        self.parent.resolver(db)
     }
 }
 

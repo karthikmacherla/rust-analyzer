@@ -11,12 +11,9 @@ export const hover = new lc.RequestType<
     HoverParams,
     (lc.Hover & { actions: CommandLinkGroup[] }) | null,
     void
->("textDocument/hover");
-export type HoverParams = { position: lc.Position | lc.Range } & Omit<
-    lc.TextDocumentPositionParams,
-    "position"
-> &
-    lc.WorkDoneProgressParams;
+>(lc.HoverRequest.method);
+export type HoverParams = { position: lc.Position | lc.Range } & Omit<lc.HoverParams, "position">;
+
 export type CommandLink = {
     /**
      * A tooltip for the command, when represented in the UI.
@@ -65,6 +62,9 @@ export const viewHir = new lc.RequestType<lc.TextDocumentPositionParams, string,
 export const viewMir = new lc.RequestType<lc.TextDocumentPositionParams, string, void>(
     "rust-analyzer/viewMir"
 );
+export const interpretFunction = new lc.RequestType<lc.TextDocumentPositionParams, string, void>(
+    "rust-analyzer/interpretFunction"
+);
 export const viewItemTree = new lc.RequestType<ViewItemTreeParams, string, void>(
     "rust-analyzer/viewItemTree"
 );
@@ -77,6 +77,38 @@ export const testRunnablesInFile = new lc.RequestType<TestRunnablesInFileParams,
     "rust-analyzer/testRunnablesInFile"
 );
 export type AnalyzerStatusParams = { textDocument?: lc.TextDocumentIdentifier };
+
+export interface FetchDependencyListParams {}
+
+export interface FetchDependencyListResult {
+    crates: {
+        name: string | undefined;
+        version: string | undefined;
+        path: string;
+    }[];
+}
+
+export const fetchDependencyList = new lc.RequestType<
+    FetchDependencyListParams,
+    FetchDependencyListResult,
+    void
+>("rust-analyzer/fetchDependencyList");
+
+export interface FetchDependencyGraphParams {}
+
+export interface FetchDependencyGraphResult {
+    crates: {
+        name: string;
+        version: string;
+        path: string;
+    }[];
+}
+
+export const fetchDependencyGraph = new lc.RequestType<
+    FetchDependencyGraphParams,
+    FetchDependencyGraphResult,
+    void
+>("rust-analyzer/fetchDependencyGraph");
 
 export type ExpandMacroParams = {
     textDocument: lc.TextDocumentIdentifier;

@@ -1,10 +1,10 @@
 //! Trait solving using Chalk.
 
-use std::{env::var, sync::Arc};
+use std::env::var;
 
-use chalk_ir::GoalData;
+use chalk_ir::{fold::TypeFoldable, DebruijnIndex, GoalData};
 use chalk_recursive::Cache;
-use chalk_solve::{logging_db::LoggingRustIrDatabase, Solver};
+use chalk_solve::{logging_db::LoggingRustIrDatabase, rust_ir, Solver};
 
 use base_db::CrateId;
 use hir_def::{
@@ -13,11 +13,12 @@ use hir_def::{
 };
 use hir_expand::name::{name, Name};
 use stdx::panic_context;
+use triomphe::Arc;
 
 use crate::{
-    db::HirDatabase, infer::unify::InferenceTable, AliasEq, AliasTy, Canonical, DomainGoal, Goal,
-    Guidance, InEnvironment, Interner, ProjectionTy, ProjectionTyExt, Solution, TraitRefExt, Ty,
-    TyKind, WhereClause,
+    db::HirDatabase, infer::unify::InferenceTable, utils::UnevaluatedConstEvaluatorFolder, AliasEq,
+    AliasTy, Canonical, DomainGoal, Goal, Guidance, InEnvironment, Interner, ProjectionTy,
+    ProjectionTyExt, Solution, TraitRefExt, Ty, TyKind, WhereClause,
 };
 
 /// This controls how much 'time' we give the Chalk solver before giving up.
@@ -87,7 +88,7 @@ pub(crate) fn trait_solve_query(
 ) -> Option<Solution> {
     let _p = profile::span("trait_solve_query").detail(|| match &goal.value.goal.data(Interner) {
         GoalData::DomainGoal(DomainGoal::Holds(WhereClause::Implemented(it))) => {
-            db.trait_data(it.hir_trait_id()).name.to_string()
+            db.trait_data(it.hir_trait_id()).name.display(db.upcast()).to_string()
         }
         GoalData::DomainGoal(DomainGoal::Holds(WhereClause::AliasEq(_))) => "alias_eq".to_string(),
         _ => "??".to_string(),
@@ -104,6 +105,12 @@ pub(crate) fn trait_solve_query(
             return Some(Solution::Ambig(Guidance::Unknown));
         }
     }
+
+    // Chalk see `UnevaluatedConst` as a unique concrete value, but we see it as an alias for another const. So
+    // we should get rid of it when talking to chalk.
+    let goal = goal
+        .try_fold_with(&mut UnevaluatedConstEvaluatorFolder { db }, DebruijnIndex::INNERMOST)
+        .unwrap();
 
     // We currently don't deal with universes (I think / hope they're not yet
     // relevant for our use cases?)
@@ -177,8 +184,10 @@ fn is_chalk_print() -> bool {
     std::env::var("CHALK_PRINT").is_ok()
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FnTrait {
+    // Warning: Order is important. If something implements `x` it should also implement
+    // `y` if `y <= x`.
     FnOnce,
     FnMut,
     Fn,
@@ -190,6 +199,14 @@ impl FnTrait {
             FnTrait::FnOnce => LangItem::FnOnce,
             FnTrait::FnMut => LangItem::FnMut,
             FnTrait::Fn => LangItem::Fn,
+        }
+    }
+
+    pub const fn to_chalk_ir(self) -> rust_ir::ClosureKind {
+        match self {
+            FnTrait::FnOnce => rust_ir::ClosureKind::FnOnce,
+            FnTrait::FnMut => rust_ir::ClosureKind::FnMut,
+            FnTrait::Fn => rust_ir::ClosureKind::Fn,
         }
     }
 

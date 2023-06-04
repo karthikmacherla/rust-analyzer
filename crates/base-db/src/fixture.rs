@@ -1,24 +1,27 @@
 //! A set of high-level utility fixture methods to use in tests.
-use std::{mem, str::FromStr, sync::Arc};
+use std::{mem, str::FromStr, sync};
 
 use cfg::CfgOptions;
 use rustc_hash::FxHashMap;
 use test_utils::{
-    extract_range_or_offset, Fixture, RangeOrOffset, CURSOR_MARKER, ESCAPED_CURSOR_MARKER,
+    extract_range_or_offset, Fixture, FixtureWithProjectMeta, RangeOrOffset, CURSOR_MARKER,
+    ESCAPED_CURSOR_MARKER,
 };
+use triomphe::Arc;
 use tt::token_id::{Leaf, Subtree, TokenTree};
 use vfs::{file_set::FileSet, VfsPath};
 
 use crate::{
     input::{CrateName, CrateOrigin, LangCrateOrigin},
     Change, CrateDisplayName, CrateGraph, CrateId, Dependency, Edition, Env, FileId, FilePosition,
-    FileRange, ProcMacro, ProcMacroExpander, ProcMacroExpansionError, ProcMacros,
+    FileRange, ProcMacro, ProcMacroExpander, ProcMacroExpansionError, ProcMacros, ReleaseChannel,
     SourceDatabaseExt, SourceRoot, SourceRootId,
 };
 
 pub const WORKSPACE: SourceRootId = SourceRootId(0);
 
 pub trait WithFixture: Default + SourceDatabaseExt + 'static {
+    #[track_caller]
     fn with_single_file(ra_fixture: &str) -> (Self, FileId) {
         let fixture = ChangeFixture::parse(ra_fixture);
         let mut db = Self::default();
@@ -27,6 +30,7 @@ pub trait WithFixture: Default + SourceDatabaseExt + 'static {
         (db, fixture.files[0])
     }
 
+    #[track_caller]
     fn with_many_files(ra_fixture: &str) -> (Self, Vec<FileId>) {
         let fixture = ChangeFixture::parse(ra_fixture);
         let mut db = Self::default();
@@ -35,6 +39,7 @@ pub trait WithFixture: Default + SourceDatabaseExt + 'static {
         (db, fixture.files)
     }
 
+    #[track_caller]
     fn with_files(ra_fixture: &str) -> Self {
         let fixture = ChangeFixture::parse(ra_fixture);
         let mut db = Self::default();
@@ -43,6 +48,7 @@ pub trait WithFixture: Default + SourceDatabaseExt + 'static {
         db
     }
 
+    #[track_caller]
     fn with_files_extra_proc_macros(
         ra_fixture: &str,
         proc_macros: Vec<(String, ProcMacro)>,
@@ -54,18 +60,21 @@ pub trait WithFixture: Default + SourceDatabaseExt + 'static {
         db
     }
 
+    #[track_caller]
     fn with_position(ra_fixture: &str) -> (Self, FilePosition) {
         let (db, file_id, range_or_offset) = Self::with_range_or_offset(ra_fixture);
         let offset = range_or_offset.expect_offset();
         (db, FilePosition { file_id, offset })
     }
 
+    #[track_caller]
     fn with_range(ra_fixture: &str) -> (Self, FileRange) {
         let (db, file_id, range_or_offset) = Self::with_range_or_offset(ra_fixture);
         let range = range_or_offset.expect_range();
         (db, FileRange { file_id, range })
     }
 
+    #[track_caller]
     fn with_range_or_offset(ra_fixture: &str) -> (Self, FileId, RangeOrOffset) {
         let fixture = ChangeFixture::parse(ra_fixture);
         let mut db = Self::default();
@@ -102,7 +111,14 @@ impl ChangeFixture {
         ra_fixture: &str,
         mut proc_macro_defs: Vec<(String, ProcMacro)>,
     ) -> ChangeFixture {
-        let (mini_core, proc_macro_names, fixture) = Fixture::parse(ra_fixture);
+        let FixtureWithProjectMeta { fixture, mini_core, proc_macro_names, toolchain } =
+            FixtureWithProjectMeta::parse(ra_fixture);
+        let toolchain = toolchain
+            .map(|it| {
+                ReleaseChannel::from_str(&it)
+                    .unwrap_or_else(|| panic!("unknown release channel found: {it}"))
+            })
+            .unwrap_or(ReleaseChannel::Stable);
         let mut change = Change::new();
 
         let mut files = Vec::new();
@@ -166,7 +182,7 @@ impl ChangeFixture {
                         .as_deref()
                         .map(Arc::from)
                         .ok_or_else(|| "target_data_layout unset".into()),
-                    None,
+                    Some(toolchain),
                 );
                 let prev = crates.insert(crate_name.clone(), crate_id);
                 assert!(prev.is_none());
@@ -182,7 +198,7 @@ impl ChangeFixture {
                 default_target_data_layout = meta.target_data_layout;
             }
 
-            change.change_file(file_id, Some(Arc::new(text)));
+            change.change_file(file_id, Some(Arc::from(text)));
             let path = VfsPath::new_virtual_path(meta.path);
             file_set.insert(file_id, path);
             files.push(file_id);
@@ -205,7 +221,7 @@ impl ChangeFixture {
                 default_target_data_layout
                     .map(|x| x.into())
                     .ok_or_else(|| "target_data_layout unset".into()),
-                None,
+                Some(toolchain),
             );
         } else {
             for (from, to, prelude) in crate_deps {
@@ -232,7 +248,7 @@ impl ChangeFixture {
             fs.insert(core_file, VfsPath::new_virtual_path("/sysroot/core/lib.rs".to_string()));
             roots.push(SourceRoot::new_library(fs));
 
-            change.change_file(core_file, Some(Arc::new(mini_core.source_code())));
+            change.change_file(core_file, Some(Arc::from(mini_core.source_code())));
 
             let all_crates = crate_graph.crates_in_topological_order();
 
@@ -247,7 +263,7 @@ impl ChangeFixture {
                 false,
                 CrateOrigin::Lang(LangCrateOrigin::Core),
                 target_layout.clone(),
-                None,
+                Some(toolchain),
             );
 
             for krate in all_crates {
@@ -271,7 +287,7 @@ impl ChangeFixture {
             );
             roots.push(SourceRoot::new_library(fs));
 
-            change.change_file(proc_lib_file, Some(Arc::new(source)));
+            change.change_file(proc_lib_file, Some(Arc::from(source)));
 
             let all_crates = crate_graph.crates_in_topological_order();
 
@@ -286,7 +302,7 @@ impl ChangeFixture {
                 true,
                 CrateOrigin::Local { repo: None, name: None },
                 target_layout,
-                None,
+                Some(toolchain),
             );
             proc_macros.insert(proc_macros_crate, Ok(proc_macro));
 
@@ -326,7 +342,7 @@ pub fn identity(_attr: TokenStream, item: TokenStream) -> TokenStream {
             ProcMacro {
                 name: "identity".into(),
                 kind: crate::ProcMacroKind::Attr,
-                expander: Arc::new(IdentityProcMacroExpander),
+                expander: sync::Arc::new(IdentityProcMacroExpander),
             },
         ),
         (
@@ -340,7 +356,7 @@ pub fn derive_identity(item: TokenStream) -> TokenStream {
             ProcMacro {
                 name: "DeriveIdentity".into(),
                 kind: crate::ProcMacroKind::CustomDerive,
-                expander: Arc::new(IdentityProcMacroExpander),
+                expander: sync::Arc::new(IdentityProcMacroExpander),
             },
         ),
         (
@@ -354,7 +370,7 @@ pub fn input_replace(attr: TokenStream, _item: TokenStream) -> TokenStream {
             ProcMacro {
                 name: "input_replace".into(),
                 kind: crate::ProcMacroKind::Attr,
-                expander: Arc::new(AttributeInputReplaceProcMacroExpander),
+                expander: sync::Arc::new(AttributeInputReplaceProcMacroExpander),
             },
         ),
         (
@@ -368,7 +384,7 @@ pub fn mirror(input: TokenStream) -> TokenStream {
             ProcMacro {
                 name: "mirror".into(),
                 kind: crate::ProcMacroKind::FuncLike,
-                expander: Arc::new(MirrorProcMacroExpander),
+                expander: sync::Arc::new(MirrorProcMacroExpander),
             },
         ),
         (
@@ -382,7 +398,7 @@ pub fn shorten(input: TokenStream) -> TokenStream {
             ProcMacro {
                 name: "shorten".into(),
                 kind: crate::ProcMacroKind::FuncLike,
-                expander: Arc::new(ShortenProcMacroExpander),
+                expander: sync::Arc::new(ShortenProcMacroExpander),
             },
         ),
     ]

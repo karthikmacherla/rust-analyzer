@@ -1,22 +1,25 @@
 //! Unification and canonicalization logic.
 
-use std::{fmt, iter, mem, sync::Arc};
+use std::{fmt, iter, mem};
 
 use chalk_ir::{
     cast::Cast, fold::TypeFoldable, interner::HasInterner, zip::Zip, CanonicalVarKind, FloatTy,
     IntTy, TyVariableKind, UniverseIndex,
 };
 use chalk_solve::infer::ParameterEnaVariableExt;
+use either::Either;
 use ena::unify::UnifyKey;
 use hir_expand::name;
 use stdx::never;
+use triomphe::Arc;
 
 use super::{InferOk, InferResult, InferenceContext, TypeError};
 use crate::{
-    db::HirDatabase, fold_tys, static_lifetime, to_chalk_trait_id, traits::FnTrait, AliasEq,
-    AliasTy, BoundVar, Canonical, Const, DebruijnIndex, GenericArg, GenericArgData, Goal, Guidance,
-    InEnvironment, InferenceVar, Interner, Lifetime, ParamKind, ProjectionTy, ProjectionTyExt,
-    Scalar, Solution, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt, TyKind, VariableKind,
+    consteval::unknown_const, db::HirDatabase, fold_tys_and_consts, static_lifetime,
+    to_chalk_trait_id, traits::FnTrait, AliasEq, AliasTy, BoundVar, Canonical, Const, ConstValue,
+    DebruijnIndex, GenericArg, GenericArgData, Goal, Guidance, InEnvironment, InferenceVar,
+    Interner, Lifetime, ParamKind, ProjectionTy, ProjectionTyExt, Scalar, Solution, Substitution,
+    TraitEnvironment, Ty, TyBuilder, TyExt, TyKind, VariableKind,
 };
 
 impl<'a> InferenceContext<'a> {
@@ -129,7 +132,7 @@ pub(crate) fn unify(
 }
 
 bitflags::bitflags! {
-    #[derive(Default)]
+    #[derive(Default, Clone, Copy)]
     pub(crate) struct TypeVariableFlags: u8 {
         const DIVERGING = 1 << 0;
         const INTEGER = 1 << 1;
@@ -229,14 +232,40 @@ impl<'a> InferenceTable<'a> {
     /// type annotation (e.g. from a let type annotation, field type or function
     /// call). `make_ty` handles this already, but e.g. for field types we need
     /// to do it as well.
-    pub(crate) fn normalize_associated_types_in(&mut self, ty: Ty) -> Ty {
-        fold_tys(
+    pub(crate) fn normalize_associated_types_in<T>(&mut self, ty: T) -> T
+    where
+        T: HasInterner<Interner = Interner> + TypeFoldable<Interner>,
+    {
+        fold_tys_and_consts(
             ty,
-            |ty, _| match ty.kind(Interner) {
-                TyKind::Alias(AliasTy::Projection(proj_ty)) => {
-                    self.normalize_projection_ty(proj_ty.clone())
-                }
-                _ => ty,
+            |e, _| match e {
+                Either::Left(ty) => Either::Left(match ty.kind(Interner) {
+                    TyKind::Alias(AliasTy::Projection(proj_ty)) => {
+                        self.normalize_projection_ty(proj_ty.clone())
+                    }
+                    _ => ty,
+                }),
+                Either::Right(c) => Either::Right(match &c.data(Interner).value {
+                    chalk_ir::ConstValue::Concrete(cc) => match &cc.interned {
+                        crate::ConstScalar::UnevaluatedConst(c_id, subst) => {
+                            // FIXME: Ideally here we should do everything that we do with type alias, i.e. adding a variable
+                            // and registering an obligation. But it needs chalk support, so we handle the most basic
+                            // case (a non associated const without generic parameters) manually.
+                            if subst.len(Interner) == 0 {
+                                if let Ok(eval) = self.db.const_eval((*c_id).into(), subst.clone())
+                                {
+                                    eval
+                                } else {
+                                    unknown_const(c.data(Interner).ty.clone())
+                                }
+                            } else {
+                                unknown_const(c.data(Interner).ty.clone())
+                            }
+                        }
+                        _ => c,
+                    },
+                    _ => c,
+                }),
             },
             DebruijnIndex::INNERMOST,
         )
@@ -715,6 +744,56 @@ impl<'a> InferenceTable<'a> {
             unreachable!("It should at least implement FnOnce at this point");
         } else {
             None
+        }
+    }
+
+    pub(super) fn insert_type_vars<T>(&mut self, ty: T) -> T
+    where
+        T: HasInterner<Interner = Interner> + TypeFoldable<Interner>,
+    {
+        fold_tys_and_consts(
+            ty,
+            |x, _| match x {
+                Either::Left(ty) => Either::Left(self.insert_type_vars_shallow(ty)),
+                Either::Right(c) => Either::Right(self.insert_const_vars_shallow(c)),
+            },
+            DebruijnIndex::INNERMOST,
+        )
+    }
+
+    /// Replaces `Ty::Error` by a new type var, so we can maybe still infer it.
+    pub(super) fn insert_type_vars_shallow(&mut self, ty: Ty) -> Ty {
+        match ty.kind(Interner) {
+            TyKind::Error => self.new_type_var(),
+            TyKind::InferenceVar(..) => {
+                let ty_resolved = self.resolve_ty_shallow(&ty);
+                if ty_resolved.is_unknown() {
+                    self.new_type_var()
+                } else {
+                    ty
+                }
+            }
+            _ => ty,
+        }
+    }
+
+    /// Replaces ConstScalar::Unknown by a new type var, so we can maybe still infer it.
+    pub(super) fn insert_const_vars_shallow(&mut self, c: Const) -> Const {
+        let data = c.data(Interner);
+        match &data.value {
+            ConstValue::Concrete(cc) => match &cc.interned {
+                crate::ConstScalar::Unknown => self.new_const_var(data.ty.clone()),
+                // try to evaluate unevaluated const. Replace with new var if const eval failed.
+                crate::ConstScalar::UnevaluatedConst(id, subst) => {
+                    if let Ok(eval) = self.db.const_eval(*id, subst.clone()) {
+                        eval
+                    } else {
+                        self.new_const_var(data.ty.clone())
+                    }
+                }
+                _ => c,
+            },
+            _ => c,
         }
     }
 }

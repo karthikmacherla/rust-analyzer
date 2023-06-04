@@ -7,15 +7,13 @@ use std::{
 };
 
 use crate::{
-    body::LowerCtx,
     lang_item::LangItemTarget,
-    type_ref::{ConstRefOrPath, LifetimeRef},
+    lower::LowerCtx,
+    type_ref::{ConstRefOrPath, LifetimeRef, TypeBound, TypeRef},
 };
 use hir_expand::name::Name;
 use intern::Interned;
 use syntax::ast;
-
-use crate::type_ref::{TypeBound, TypeRef};
 
 pub use hir_expand::mod_path::{path, ModPath, PathKind};
 

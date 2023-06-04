@@ -132,13 +132,11 @@ function createCommands(): Record<string, CommandFactory> {
             enabled: commands.onEnter,
             disabled: (_) => () => vscode.commands.executeCommand("default:type", { text: "\n" }),
         },
-        reload: {
+        restartServer: {
             enabled: (ctx) => async () => {
-                void vscode.window.showInformationMessage("Reloading rust-analyzer...");
                 await ctx.restart();
             },
             disabled: (ctx) => async () => {
-                void vscode.window.showInformationMessage("Reloading rust-analyzer...");
                 await ctx.start();
             },
         },
@@ -173,6 +171,7 @@ function createCommands(): Record<string, CommandFactory> {
         syntaxTree: { enabled: commands.syntaxTree },
         viewHir: { enabled: commands.viewHir },
         viewMir: { enabled: commands.viewMir },
+        interpretFunction: { enabled: commands.interpretFunction },
         viewFileText: { enabled: commands.viewFileText },
         viewItemTree: { enabled: commands.viewItemTree },
         viewCrateGraph: { enabled: commands.viewCrateGraph },
@@ -203,5 +202,6 @@ function createCommands(): Record<string, CommandFactory> {
         showReferences: { enabled: commands.showReferences },
         triggerParameterHints: { enabled: commands.triggerParameterHints },
         openLogs: { enabled: commands.openLogs },
+        revealDependency: { enabled: commands.revealDependency },
     };
 }

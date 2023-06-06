@@ -19,7 +19,7 @@ export async function makeDebugConfig(ctx: Ctx, runnable: ra.Runnable): Promise<
     const scope = ctx.activeRustEditor?.document.uri;
     if (!scope) return;
 
-    const debugConfig = await getDebugConfiguration(ctx, runnable);
+    const debugConfig = await getDebugConfigurationByRunnable(ctx, runnable);
     if (!debugConfig) return;
 
     const wsLaunchSection = vscode.workspace.getConfiguration("launch", scope);
@@ -42,9 +42,9 @@ export async function makeDebugConfig(ctx: Ctx, runnable: ra.Runnable): Promise<
     await wsLaunchSection.update("configurations", configurations);
 }
 
-export async function startDebugSession(ctx: Ctx, runnable: ra.Runnable): Promise<boolean> {
+export async function getDebugConfiguration(ctx: Ctx, runnable: ra.Runnable) {
     let debugConfig: vscode.DebugConfiguration | undefined = undefined;
-    let message = "";
+    let isFromLacunchJson = false;
 
     const wsLaunchSection = vscode.workspace.getConfiguration("launch");
     const configurations = wsLaunchSection.get<any[]>("configurations") || [];
@@ -52,20 +52,25 @@ export async function startDebugSession(ctx: Ctx, runnable: ra.Runnable): Promis
     const index = configurations.findIndex((c) => c.name === runnable.label);
     if (-1 !== index) {
         debugConfig = configurations[index];
-        message = " (from launch.json)";
+        isFromLacunchJson = true;
         debugOutput.clear();
     } else {
-        debugConfig = await getDebugConfiguration(ctx, runnable);
+        debugConfig = await getDebugConfigurationByRunnable(ctx, runnable);
     }
+    return {isFromLacunchJson ,debugConfig};
+}
+
+export async function startDebugSession(ctx: Ctx, runnable: ra.Runnable): Promise<boolean> {
+    const {debugConfig, isFromLacunchJson} = await getDebugConfiguration(ctx,runnable);
 
     if (!debugConfig) return false;
 
-    debugOutput.appendLine(`Launching debug configuration${message}:`);
+    debugOutput.appendLine(`Launching debug configuration${isFromLacunchJson?" (from launch.json)":""}:`);
     debugOutput.appendLine(JSON.stringify(debugConfig, null, 2));
     return vscode.debug.startDebugging(undefined, debugConfig);
 }
 
-async function getDebugConfiguration(
+async function getDebugConfigurationByRunnable(
     ctx: Ctx,
     runnable: ra.Runnable
 ): Promise<vscode.DebugConfiguration | undefined> {

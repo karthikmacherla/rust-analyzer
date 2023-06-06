@@ -1,5 +1,8 @@
 /* eslint-disable no-console */
 import * as vscode from "vscode";
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs/promises';
 import * as toolchain from "../toolchain";
 import { testController } from ".";
 import { spawn } from "child_process";
@@ -7,9 +10,9 @@ import { assert } from "../util";
 import { createArgs, prepareEnv } from "../run";
 import { getRunnableByTestItem } from "./discover_and_update";
 import { TestControllerHelper } from "./TestControllerHelper";
-import { startDebugSession } from "../debug";
+import { getDebugConfiguration } from "../debug";
 import { raContext } from "../main";
-import { RustcOutputAnalyzer } from "./RustcOutputAnalyzer";
+import { LinesRustOutputAnalyzer, PipeRustcOutputAnalyzer } from "./RustcOutputAnalyzer";
 import { fail } from "assert";
 
 export async function runHandler(
@@ -28,10 +31,10 @@ export async function runHandler(
 
     switch (request.profile?.kind) {
         case vscode.TestRunProfileKind.Debug:
-            await debugChosenTestItems(chosenItems, token);
+            await debugChosenTestItems(testRun, chosenItems, token);
             return;
         case vscode.TestRunProfileKind.Run:
-            await runChosenTestItems(chosenItems, token, testRun);
+            await runChosenTestItems(testRun, chosenItems, token);
             return;
         case vscode.TestRunProfileKind.Coverage:
             await vscode.window.showErrorMessage("Not support Coverage yet");
@@ -85,25 +88,91 @@ async function getChosenTestItems(request: vscode.TestRunRequest) {
     return request.include;
 }
 
-async function debugChosenTestItems(chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
+async function debugChosenTestItems(testRun: vscode.TestRun,chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
     if (!raContext) {
         return;
     }
 
-    // TODO: add a flag to control this message, to make it less verbose.
-    await vscode.window.showInformationMessage("Please note that debug will not change the state of test cases for now. Rerun them to update the state.");
+    await vscode.window.showInformationMessage("The test item status will be updated after debug session is terminated");
 
     assert(chosenTestItems.length === 1, "only support 1 select test item for debugging, at least for now.");
-    const runnable = getRunnableByTestItem(chosenTestItems[0]).origin;
+    const chosenTestItem = chosenTestItems[0];
+    const runnable = getRunnableByTestItem(chosenTestItem).origin;
 
-    await startDebugSession(raContext, runnable);
+    const disposables: vscode.Disposable[] = [];
+
+    // most of the following logic comes from vscode-java-test repo. Thanks!
+    const { debugConfig, isFromLacunchJson } = await getDebugConfiguration(raContext, runnable);
+
+    if (!debugConfig) {
+        return;
+    }
+
+    if (debugConfig.type !== 'lldb') {
+        await vscode.window.showInformationMessage("Sorry, for now, only lldb is supported for debugging when using Testing Explorer powered by Rust-Analyzer");
+        return;
+    }
+
+    let tmpFilePath:string|undefined;
+
+    if (isFromLacunchJson && debugConfig.stdio) {
+        await vscode.window.showInformationMessage("The test choose config from launch.json and you alredy set Stdio Redirection option. We respect it but could not analytics the output.");
+    } else {
+        const tmpFolderPath = await fs.mkdtemp(path.join(os.tmpdir(), 'ra-test-redirect-'));
+        tmpFilePath =path.join(tmpFolderPath, 'output.txt');
+        debugConfig.stdio = [null, tmpFilePath];
+    }
+
+    let debugSession: vscode.DebugSession | undefined;
+    disposables.push(vscode.debug.onDidStartDebugSession((session: vscode.DebugSession) => {
+        // Safe, because concurrently debugging is not allowed.
+        // So the name should not be duplicated
+        if (session.name === debugConfig.name) {
+            debugSession = session;
+        }
+    }));
+
+    const success = await vscode.debug.startDebugging(undefined, debugConfig);
+
+    if (!success || token.isCancellationRequested) {
+        dispose();
+        return;
+    }
+
+    token.onCancellationRequested(async () => {
+        await debugSession?.customRequest('disconnect', { restart: false });
+    });
+
+    return await new Promise<void>((resolve: () => void): void => {
+        disposables.push(
+            vscode.debug.onDidTerminateDebugSession(async (session: vscode.DebugSession) => {
+                if (debugConfig.name === session.name) {
+                    debugSession = undefined;
+                    dispose();
+                    if (tmpFilePath) {
+                        const fileLineContents = (await fs.readFile(tmpFilePath, 'utf-8'))
+                            .split(/\r?\n/);
+                        const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
+                        outputAnalyzer.analyticsLines(fileLineContents);
+                    }
+                    return resolve();
+                }
+            }),
+        );
+    });
+
+    function dispose() {
+        disposables.forEach(d => d.dispose());
+        disposables.length = 0;
+        testRun.end();
+    }
 }
 
 // refer from playwright-vscode
 /**
  * @param chosenTestItems The chosen ones of test items. The test cases which should be run should be the children of them.
  */
-async function runChosenTestItems(chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken, testRun: vscode.TestRun) {
+async function runChosenTestItems(testRun: vscode.TestRun,chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
     assert(chosenTestItems.length === 1, "only support 1 select test item for running, at least for now.");
     const chosenTestItem = chosenTestItems[0];
     const runnable = getRunnableByTestItem(chosenTestItem).origin;
@@ -130,7 +199,7 @@ async function runChosenTestItems(chosenTestItems: readonly vscode.TestItem[], t
     // output the runned command.
     testRun.appendOutput(`${cargoPath} ${finalArgs.join(' ')}`);
 
-    const outputAnalyzer = new RustcOutputAnalyzer(testRun, chosenTestItem);
+    const outputAnalyzer = new PipeRustcOutputAnalyzer(testRun, chosenTestItem);
 
     // start process and listen to the output
     const childProcess = spawn(cargoPath, finalArgs, {

@@ -142,7 +142,7 @@ export class WorkspacesRoot {
             testKind,
         } = runnable;
 
-        const workspaceNode = this.roots.find((root) => root.workspaceRoot.fsPath === workspaceRoot);
+        const workspaceNode = this.roots.find((root) => root.workspaceRoot.fsPath.toLowerCase() === workspaceRoot.toLowerCase());
         assert(!!workspaceNode);
 
         const packageNode = workspaceNode?.members.find((p) => p.name === packageName);

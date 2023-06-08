@@ -57,15 +57,15 @@ export async function getDebugConfiguration(ctx: Ctx, runnable: ra.Runnable) {
     } else {
         debugConfig = await getDebugConfigurationByRunnable(ctx, runnable);
     }
-    return {isFromLacunchJson ,debugConfig};
+    return { isFromLacunchJson, debugConfig };
 }
 
 export async function startDebugSession(ctx: Ctx, runnable: ra.Runnable): Promise<boolean> {
-    const {debugConfig, isFromLacunchJson} = await getDebugConfiguration(ctx,runnable);
+    const { debugConfig, isFromLacunchJson } = await getDebugConfiguration(ctx, runnable);
 
     if (!debugConfig) return false;
 
-    debugOutput.appendLine(`Launching debug configuration${isFromLacunchJson?" (from launch.json)":""}:`);
+    debugOutput.appendLine(`Launching debug configuration${isFromLacunchJson ? " (from launch.json)" : ""}:`);
     debugOutput.appendLine(JSON.stringify(debugConfig, null, 2));
     return vscode.debug.startDebugging(undefined, debugConfig);
 }

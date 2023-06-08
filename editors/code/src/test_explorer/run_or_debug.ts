@@ -149,12 +149,14 @@ async function debugChosenTestItems(testRun: vscode.TestRun,chosenTestItems: rea
                 if (debugConfig.name === session.name) {
                     debugSession = undefined;
                     dispose();
-                    if (tmpFilePath) {
-                        const fileLineContents = (await fs.readFile(tmpFilePath, 'utf-8'))
-                            .split(/\r?\n/);
-                        const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
-                        outputAnalyzer.analyticsLines(fileLineContents);
-                    }
+                    await vscode.window.showWarningMessage("When use debugging, the status of test item will not be updated. Waiting for https://github.com/vadimcn/codelldb/issues/948");
+                    // TODO: wait for https://github.com/vadimcn/codelldb/issues/948
+                    // if (tmpFilePath) {
+                    //     const fileLineContents = (await fs.readFile(tmpFilePath, 'utf-8'))
+                    //         .split(/\r?\n/);
+                    //     const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
+                    //     outputAnalyzer.analyticsLines(fileLineContents);
+                    // }
                     return resolve();
                 }
             }),

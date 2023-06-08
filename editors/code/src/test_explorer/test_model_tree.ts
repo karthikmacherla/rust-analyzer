@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { CargoMetadata, CargoPackageMetadata, CargoTargetKind, CargoTargetMetadata } from "../toolchain";
 import { assert, assertNever } from "../util";
 import { RunnableFacde } from "./RunnableFacde";
+import { fail } from "node:assert";
 
 export enum NodeKind {
     // VSCodeWorkSpace,
@@ -20,20 +21,31 @@ export enum TargetKind {
 }
 
 export namespace TargetKind {
-    export function from(cargoTargetKind: CargoTargetKind[]) {
-        assert(cargoTargetKind.length === 1, 'Should only contains one element');
-        switch (cargoTargetKind[0]) {
-            case CargoTargetKind.Binary:
-                return TargetKind.Binary;
-            case CargoTargetKind.Lib:
-                return TargetKind.Library;
-            case CargoTargetKind.Test:
-                return TargetKind.IntegrationTest;
-            case CargoTargetKind.Example:
-            case CargoTargetKind.Bench:
-                return undefined;
-            default:
-                assertNever(cargoTargetKind[0]);
+    export function from(cargoTargetKinds: CargoTargetKind[]) {
+        if (cargoTargetKinds.length === 1) {
+            switch (cargoTargetKinds[0]) {
+                case CargoTargetKind.Binary:
+                    return TargetKind.Binary;
+                case CargoTargetKind.Lib:
+                case CargoTargetKind.RustLib:
+                case CargoTargetKind.CDynamicLib:
+                case CargoTargetKind.DynamicLib:
+                case CargoTargetKind.StaticLib:
+                    return TargetKind.Library;
+                case CargoTargetKind.Test:
+                    return TargetKind.IntegrationTest;
+                case CargoTargetKind.Example:
+                case CargoTargetKind.Bench:
+                case CargoTargetKind.BuildScript:
+                    return undefined;
+                default:
+                    assertNever(cargoTargetKinds[0]);
+            }
+        } else if(cargoTargetKinds.every(it =>
+            CargoTargetKind.isLibraryLike(it))) {
+            return TargetKind.Library;
+        } else {
+            fail("Oops, you met an unknown situation that RA could not verify the kind of the target");
         }
     }
 }

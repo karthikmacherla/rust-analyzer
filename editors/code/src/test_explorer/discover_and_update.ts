@@ -493,7 +493,7 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         if (this.isWorkspaceEmptyWithTests(node)) {
             return true;
         }
-        const testItem = testController!.createTestItem(node.workspaceRoot.toString(), node.workspaceRoot.toString(), node.manifestPath);
+        const testItem = testController!.createTestItem(node.workspaceRoot.toString(), `$(project)${node.workspaceRoot.fsPath}`, node.manifestPath);
         this.addTestItemToParentOrRoot(node, testItem);
         return false;
     }

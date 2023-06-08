@@ -23,12 +23,41 @@ export interface CargoMetadata {
     packages: CargoPackageMetadata[];
 }
 
+/**
+ * The value of property "cargo metadata".packages[x].targets[y].kind[0]
+ */
 export enum CargoTargetKind {
     Lib = "lib",
     Binary = "bin",
     Test = "test",
     Example = "example",
-    Bench= 'bench',
+    Bench = 'bench',
+    /**
+     * Refer "https://doc.rust-lang.org/cargo/reference/build-scripts.html"
+     *
+     * "build.rs" is a special target internally
+     */
+    BuildScript = "custom-build",
+    /** refer https://doc.rust-lang.org/reference/linkage.html */
+    DynamicLib = "dylib",
+    /** refer https://doc.rust-lang.org/reference/linkage.html */
+    StaticLib = "staticlib",
+    /** refer https://doc.rust-lang.org/reference/linkage.html */
+    CDynamicLib = "cdylib",
+    /** refer https://doc.rust-lang.org/reference/linkage.html */
+    RustLib = "rlib",
+}
+
+export namespace CargoTargetKind {
+    export function isLibraryLike(targetKind:CargoTargetKind) {
+        return [
+            CargoTargetKind.Lib,
+            CargoTargetKind.DynamicLib,
+            CargoTargetKind.StaticLib,
+            CargoTargetKind.CDynamicLib,
+            CargoTargetKind.RustLib,
+        ].includes(targetKind);
+    }
 }
 
 export enum CargoCrateType {

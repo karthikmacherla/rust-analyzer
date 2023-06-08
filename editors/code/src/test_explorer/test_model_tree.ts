@@ -463,3 +463,10 @@ export function getWorkspaceNodeOfTestModelNode(testModel: Nodes) {
     }
     return testModel;
 }
+
+export function getPackageNodeOfTestModelNode(testModel: TestModuleNode | TargetNode | TestNode | CargoPackageNode) {
+    while (testModel.kind !== NodeKind.CargoPackage) {
+        testModel = testModel.parent;
+    }
+    return testModel;
+}

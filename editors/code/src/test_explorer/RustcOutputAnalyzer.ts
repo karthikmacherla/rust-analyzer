@@ -2,7 +2,7 @@
 import * as vscode from "vscode";
 import { assert, assertNever } from "../util";
 import { getTestItemByTestLikeNode, getTestModelByTestItem } from "./discover_and_update";
-import { NodeKind, Nodes, getWorkspaceNodeOfTestModelNode, testModelTree } from "./test_model_tree";
+import { CargoPackageNode, NodeKind, Nodes, TargetNode, TestModuleNode, TestNode, getPackageNodeOfTestModelNode, getWorkspaceNodeOfTestModelNode, testModelTree } from "./test_model_tree";
 import { sep } from 'node:path';
 
 const targetPatternNamedCaptureGroup = {
@@ -151,38 +151,37 @@ namespace RustcTestResult {
 }
 
 class TestItemLocator {
-    private readonly _testModel: Nodes;
+    private readonly _testModel: CargoPackageNode | TargetNode | TestModuleNode | TestNode;
 
     // We only allow one test case to be runned
     constructor(chosenRunnedTestItem: vscode.TestItem) {
-        this._testModel = getTestModelByTestItem(chosenRunnedTestItem);
-        assert(this._testModel.kind === NodeKind.Test
-            || this._testModel.kind === NodeKind.TestModule
-            || this._testModel.kind === NodeKind.Target
-            || this._testModel.kind === NodeKind.CargoPackage,
+        const node = getTestModelByTestItem(chosenRunnedTestItem);
+        assert(node.kind === NodeKind.Test
+            || node.kind === NodeKind.TestModule
+            || node.kind === NodeKind.Target
+            || node.kind === NodeKind.CargoPackage,
             "does not support workspace level, until we allow try to guess the target"
         );
+        this._testModel = node;
     }
 
     /**
      * @param path This is the path which is shown on the output of test result, like mod1::mod2::mod3::test1
      */
     findTestItemByRustcOutputCasePath(packageNormalizedName: string, targetRelativePath: string, path: string): vscode.TestItem | undefined {
-        // get workspace through runned test item
-        // get package through packageNormalizedName
-        // get target through targetRelativePath
-        // get test item through path
+        // const workspaceRootNode = getWorkspaceNodeOfTestModelNode(this._testModel);
+        const packageNode = getPackageNodeOfTestModelNode(this._testModel);
 
-        const workspaceRootNode = getWorkspaceNodeOfTestModelNode(this._testModel);
-
-        const targetCandidates = workspaceRootNode.members
-            .flatMap(packageNode => Array.from(packageNode.targets))
+        const targetCandidates =
+            // workspaceRootNode.members
+            // .flatMap(packageNode => Array.from(packageNode.targets))
+            Array.from(packageNode.targets)
             .filter(target =>
                 normalizeTargetName(target.name) === packageNormalizedName
                 && target.srcPath.fsPath.includes(targetRelativePath)
             );
 
-        assert(targetCandidates.length === 1, "should find one and only one target node");
+        assert(targetCandidates.length === 1, "should find one and only one target node, but they might have same name and relative path, although it should be really rare");
         // REVIEW: What should we do if we found 2 or more candidates?
 
         const targetNode = targetCandidates[0];

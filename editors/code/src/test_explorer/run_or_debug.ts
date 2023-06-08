@@ -109,7 +109,9 @@ async function debugChosenTestItems(testRun: vscode.TestRun,chosenTestItems: rea
     }
 
     if (debugConfig.type !== 'lldb') {
-        await vscode.window.showInformationMessage("Sorry, for now, only lldb is supported for debugging when using Testing Explorer powered by Rust-Analyzer");
+        await vscode.window.showInformationMessage("Sorry, for now, only [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) is supported for debugging when using Testing Explorer powered by Rust-Analyzer"
+        + "You can use CodeLens to debug with [MS C++ tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools)"
+        );
         return;
     }
 

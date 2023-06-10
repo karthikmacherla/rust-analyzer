@@ -1,13 +1,13 @@
 /* eslint-disable no-console */
 import * as vscode from "vscode";
-import * as lc from "vscode-languageclient";
 import { testController } from ".";
 import { assert, assertNever, isRustDocument } from "../util";
 import { RaApiHelper } from "./api_helper";
 import { RunnableFacde } from "./RunnableFacde";
 import { performance } from "perf_hooks";
 import { CargoMetadata } from "../toolchain";
-import { CargoPackageNode, CargoWorkspaceNode, TargetNode, NodeKind, TestModuleNode, testModelTree, isTestModuleNode, WorkspacesVisitor, TestNode, Nodes, TargetKind, TestLikeNode, isTestNode } from "./test_model_tree";
+import { CargoPackageNode, CargoWorkspaceNode, TargetNode, NodeKind, TestModuleNode, testModelTree, isTestModuleNode, WorkspacesVisitor, TestNode, Nodes, TargetKind, TestLikeNode, isTestNode, isTestLikeNode } from "./test_model_tree";
+import { fail } from "assert";
 
 let isInitilized = false;
 
@@ -71,6 +71,7 @@ function debounce(fn: Function, ms: number) {
 // the first one is for the change of the file, the second one is for the save of the file
 // And usually it takes about 1s between on my machine between the two events
 const deboundeRefresh = debounce(refreshAllThings, 2000);
+
 // FIXME: if there is changes in two files, we will lost the first chagne
 const debounceHandleFileChangeCore = debounce(handleFileChangeCore, 2000);
 
@@ -149,6 +150,60 @@ async function handleFileDelete(uri: vscode.Uri) {
     updateTestItemsByModel();
 }
 
+const batchUpdateTestItemsByModel = batchFunction(updateTestItemsByModel);
+
+export const resolveHandler: vscode.TestController["resolveHandler"] = async function (item) {
+    if (!item) {
+        console.log("From resolve hanlder, init.");
+        // init logic
+        registerWatcherForWorkspaces();
+        await discoverAllFilesInWorkspaces();
+        return;
+    }
+    const idPath: string[] = [];
+    let tmpItem = item;
+    idPath.push(tmpItem.id);
+    while (tmpItem.parent) {
+        idPath.unshift(tmpItem.parent.id);
+        tmpItem = tmpItem.parent;
+    }
+    console.log(`Item with ID "${idPath.join("::")}" is running resolve handler`);
+    const node = getTestModelByTestItem(item);
+    switch (node.kind) {
+        case NodeKind.CargoWorkspace:
+            fail("Package data is got when getting workspace data, no need to be resolved lazily");
+        case NodeKind.CargoPackage:
+            fail("Targets data is got when getting workspace data, no need to be resolved lazily");
+        case NodeKind.Target:
+            fail("The children for target are handled specially. Target is the surface of cargo metadata and front-end life-cycle for now. Eagerly fetch the children to verify whether there is tests or not.");
+        case NodeKind.TestModule:
+            if (node.testChildren.size > 0) {
+                console.log(`Item with ID "${idPath.join("::")}" does not need to be run, because it already has children`);
+                return;
+            }
+            await fetchAndUpdateChildrenForTestModuleNode(node);
+            break;
+        case NodeKind.Test:
+            fail("test does not contain any children, and should not be be able to resolve.");
+    }
+    batchUpdateTestItemsByModel();
+};
+
+interface SideEffectFunction {
+    (): void;
+}
+
+function batchFunction(f: SideEffectFunction): SideEffectFunction {
+    let isBatched = false;
+    return (): void => {
+        isBatched = true;
+        setTimeout(() => {
+            f();
+            isBatched = false;
+        }, 0);
+    };
+}
+
 function updateTestItemsByModel() {
     testController!.items.replace([]);
     const rootTestItems = VscodeTestTreeBuilder.build();
@@ -198,80 +253,55 @@ async function updateModelByChangeOfFile(uri: vscode.Uri) {
 
     assert(testModuelRunnables.length + testItemRunnables.length === runnables.length);
 
-    // FIXME: should be file test modules
-    const rootTestModuleRunnbale = testModuelRunnables[0];
+    // FIXME: should be file test modules, because of `path` attribute
+    const fileTestModuleRunnbale = testModuelRunnables[0];
 
-    // Now, we know the root test module
-    // Note that the parent might be not exist in the tree.
-    // Then how to update the test model tree?
-    // There are two ways:
-    // - down-to-up, which means get parent module,  and create parent recursively
-    // - up-to-down, find the nearest parent, and create children for it
-    // up-to-down is simpler, since the logic could be reused,
-    // for anyway we need to init, which is up-to-dowm :P
-    // PS: we could set dirty flag to make it more effective, but I think it's fine
+    const nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
 
-    // Observe that:
-    // if node is new in the tree, fetch its children too
-    // if node is existing in the tree,
-    // - and it's definition, then we have got all of the runnables(because they
-    // are in same file) and will be updated
-    // - and it's declaration
-    //   - and definition uri is not changed, then not fetch children
-    //   - and definition uri is changed, then fetch the children
+    assert(nearestNode.kind !== NodeKind.Test, "it's a test module");
+    assert(nearestNode.kind !== NodeKind.CargoWorkspace, "We never partially delete delete workspace and package info, so at least it's a package");
 
-    // So, the final steps are:
-    // 1. Make the change(remove, add new test module declaration or add test module with items),
-    // but not fetch children for new test module declaration
-    // 2. collectt which children need to be fetched(reuse logic)
-    // 3. fetch children(reuse logic)
-
-    const nearestNode = testModelTree.findNearestNodeByRunnable(rootTestModuleRunnbale);
-
-    assert(nearestNode.kind !== NodeKind.Test, "the nearest node of root module can not be a test node.");
-
-    // create target node
+    // create target node when creating the first test for some target.
     // This is necessary, because we do not know how many targets a package contains unless we fetch data of `cargo metadata`
     // But we want to only fetch it when cargo file is changed, to make things more lazily.
-    if (rootTestModuleRunnbale.origin.label === "test-mod "
+    if (fileTestModuleRunnbale.origin.label === "test-mod "
         && nearestNode.kind !== NodeKind.TestModule) {
         assert(nearestNode.kind === NodeKind.CargoPackage, "we do not delete package node unless refetch metadata");
         // TODO: what should we do if user add a new package or workspace?
         // Maybe listen to the change of cargo file, and always refresh everything
         // This runnable is from a target, create the target if it's not exist in test model tree
         const newTargetNode = new TargetNode(nearestNode,
-            rootTestModuleRunnbale.targetKind,
-            rootTestModuleRunnbale.targetName,
-            rootTestModuleRunnbale.uri.fsPath);
+            fileTestModuleRunnbale.targetKind,
+            fileTestModuleRunnbale.targetName,
+            fileTestModuleRunnbale.uri.fsPath);
         nearestNode.targets.add(newTargetNode);
     }
 
-    // if nearest node is the node that the runnable represent, do the update stuff
-    // TODO: for easy, we just remove the whole children for now
-    //       but this is overkill, we could reuse the test modules
-    //       if definition are same(and not in the same file)
-    if (nearestNode.kind === NodeKind.TestModule
-        && nearestNode.definitionUri.toString() === rootTestModuleRunnbale.uri.toString()
-        && nearestNode.name === rootTestModuleRunnbale.testOrSuiteName) {
-        nearestNode.testChildren.clear();
+    await ensureTestModuleParentExist(fileTestModuleRunnbale);
+
+    const parentModule = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+
+    assert(isTestModuleNode(parentModule));
+
+    await updateFileDefinitionTestModuleByRunnables(parentModule, runnables);
+
+    async function ensureTestModuleParentExist(runnable: RunnableFacde) {
+        let nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+
+        assert(isTestLikeNode(nearestNode));
+
+        while (!isTestNodeAndRunnableMatched(nearestNode, runnable)) {
+            // parent test node is not existed, create it recursively
+            assert(isTestModuleNode(nearestNode));
+            await fetchAndUpdateChildrenForTestModuleNode(nearestNode);
+
+            nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+            assert(isTestLikeNode(nearestNode));
+        }
     }
-
-    // collect nodes which children need to be fetched
-    const nodeNeededFetched = FalsyLeavesCollector.collect(nearestNode);
-
-    // fetch the children for nodes
-    await fetchChildrenForFalsyLeaves(nodeNeededFetched);
 }
 
-async function fetchChildrenForFalsyLeaves(testModuleNodes: TestModuleNode[]) {
-    // TODO: maybe concurrent?
-    for (const testModuleNode of testModuleNodes) {
-        await fetchChildrenForTestModuleNode(testModuleNode);
-    }
-}
-
-async function fetchChildrenForTestModuleNode(testModuleNode: TestModuleNode) {
-    assert(testModuleNode.testChildren.size === 0, "TestModuleNode must be leaf when update from up-to-down");
+async function fetchAndUpdateChildrenForTestModuleNode(testModuleNode: TestModuleNode) {
     assert(
         testModuleNode.isRootTestModule() ===
         (testModuleNode.declarationInfo.uri.toString() === testModuleNode.definitionUri.toString())
@@ -281,10 +311,10 @@ async function fetchChildrenForTestModuleNode(testModuleNode: TestModuleNode) {
 
     const runnables = await getNormalizedTestRunnablesInFile(definitionUri);
 
-    await updateModelByRunnables(testModuleNode, runnables);
+    await updateFileDefinitionTestModuleByRunnables(testModuleNode, runnables);
 }
 
-async function updateModelByRunnables(parentNode: TestModuleNode, runnables: RunnableFacde[]) {
+function categorizeRunnables(runnables: RunnableFacde[]) {
     const testModuelRunnables = runnables.filter(it =>
         it.testKind === NodeKind.TestModule);
 
@@ -293,15 +323,57 @@ async function updateModelByRunnables(parentNode: TestModuleNode, runnables: Run
 
     assert(testModuelRunnables.length + testRunnables.length === runnables.length);
 
-    const declarationModuleRunnables = testModuelRunnables.filter(isTestModuleDeclarationRunnable);
-    const fileDefinitionModuleRunnables = testModuelRunnables.filter(isTestModuleFileDefinitionRunnable);
-    const withItemsModuleRunnables = testModuelRunnables.filter(isTestModuleWithItemsRunnable);
+    const declarationModuleRunnables = testModuelRunnables.filter(r => r.isTestModuleDeclarationRunnable);
+    const fileDefinitionModuleRunnables = testModuelRunnables.filter(r => r.isTestModuleFileDefinitionRunnable);
+    const withItemsModuleRunnables = testModuelRunnables.filter(r => r.isTestModuleWithItemsRunnable);
 
     assert(declarationModuleRunnables.length + fileDefinitionModuleRunnables.length + withItemsModuleRunnables.length === testModuelRunnables.length);
+    return {
+        testRunnables,
+        declarationModuleRunnables,
+        fileDefinitionModuleRunnables,
+        withItemsModuleRunnables
+    };
+}
+
+/**
+ * If node and runnable is matched, they only possible differnce should be location
+ * In the other word, the test item build by the test model could be run through this runnable
+ */
+function isTestNodeAndRunnableMatched(node: TestLikeNode, runnable: RunnableFacde): node is TestLikeNode {
+    return runnable.testPaths.join() === node.testPaths.join();
+}
+
+/**
+ * Update test module's children with new fetched runnables
+ * 
+ * @param parentNode 
+ * @param runnables 
+ */
+async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleNode, runnables: RunnableFacde[]) {
+    const { added, deleted, updated } = distinguishChanges(runnables);
+
+    /// updated
+    updated.forEach(([testLikeNode, runnable]) => {
+        // update the relationship
+        // (although it should be fine to not update, because we only use runnable later to run/debug)
+        runnableByTestModel.set(testLikeNode, runnable);
+        // update the location
+        updateLocationOfTestLikeByRunnable(testLikeNode, runnable);
+    });
+
+    /// deleted
+    deleted.forEach(node => {
+        assert(node.parent.kind === NodeKind.TestModule);
+        node.parent.testChildren.delete(node);
+    });
+
+    /// added
+    const { declarationModuleRunnables, fileDefinitionModuleRunnables, testRunnables, withItemsModuleRunnables, } = categorizeRunnables(added);
 
     // Handle fileDefinitionModules
     // Not Handle fileDefinitionModule, we choose to use definition rather then declaration as the presentation of test module
-    // which means, when find the test item in test explorer, will refirect to declaration rather than the file
+    // which means, when user goto the test, will be rediredct to the declaration rather than some file.
 
     // Handle testRunnables and test modules which have items, which are in the same test file
     addTestModuleWithItemsRunnablesToTestModule(parentNode, withItemsModuleRunnables);
@@ -310,90 +382,135 @@ async function updateModelByRunnables(parentNode: TestModuleNode, runnables: Run
     // Handle declarationModules
     // TODO: maybe concurrent?
     for (const declarationModuleRunnable of declarationModuleRunnables) {
-        await addAndFetchDeclarationModuleRunnableToTestModule(parentNode, declarationModuleRunnable);
+        await addDeclarationModuleRunnableToTestModule(parentNode, declarationModuleRunnable);
     }
-}
 
+    function distinguishChanges(runnables: RunnableFacde[]) {
+        const { declarationModuleRunnables, fileDefinitionModuleRunnables, testRunnables, withItemsModuleRunnables } = categorizeRunnables(runnables);
 
-async function addAndFetchDeclarationModuleRunnableToTestModule(parentNode: TestModuleNode, declarationModuleRunnable: RunnableFacde) {
-    const definition = await getModuleDefinitionLocation(declarationModuleRunnable);
+        const finalRunnables = [...declarationModuleRunnables, ...testRunnables, ...withItemsModuleRunnables];
 
-    // Add declarationModule node into the tree
-    const testModule = new TestModuleNode(
-        parentNode,
-        declarationModuleRunnable.testOrSuiteName,
-        declarationModuleRunnable.toTestLocation(),
-        vscode.Uri.parse(definition.targetUri));
-    parentNode.testChildren.add(testModule);
+        // get all children in the file of test module
+        const childrenOfParentnode = ChildrenCollector.collect(parentNode);
+        const childrenInTheSameFile = childrenOfParentnode.filter(node => isTestLikeNodeInTheSameFile(node, parentNode));
 
-    // Fetch and update their definitions
-    await fetchChildrenForTestModuleNode(testModule);
-}
+        // distinguish update/add/delete nodes
+        const updated: [TestLikeNode, RunnableFacde][] = [];
+        const added: RunnableFacde[] = [];
+        const deleted: Set<TestLikeNode> = new Set(childrenInTheSameFile);
 
-function addTestModuleWithItemsRunnablesToTestModule(parentNode: TestModuleNode, runnables: RunnableFacde[]) {
-    // sort to ensure the parent is added before the chidren
-    runnables.sort(RunnableFacde.sortByLabel)
-        .forEach(runnable => {
-            // TODO: Is this slow?
-            const parentNode = testModelTree.findNearestNodeByRunnable(runnable);
-            assert(parentNode.kind === NodeKind.TestModule, "Runable should be inserted into TestModule/Test, we create mock runnable for target/workspace node");
-            if (!parentNode.isRootTestModule()) {
-                assert(parentNode.name === runnable.testPaths[runnable.testPaths.length - 2]);
-            }
-
-            switch (runnable.testKind) {
-                case NodeKind.Test:
-                    const testNode = new TestNode(parentNode,
-                        runnable.toTestLocation(),
-                        runnable.testOrSuiteName);
-                    runnableByTestModel.set(testNode, runnable);
-                    parentNode.testChildren.add(testNode);
-                    break;
-                case NodeKind.TestModule:
-                    const testModuleNode = new TestModuleNode(
-                        parentNode,
-                        runnable.testOrSuiteName,
-                        runnable.toTestLocation(),
-                        runnable.uri,
-                    );
-                    runnableByTestModel.set(testModuleNode, runnable);
-                    parentNode.testChildren.add(testModuleNode);
-                    break;
-                default:
-                    assertNever(runnable.testKind);
+        finalRunnables.forEach(it => {
+            const testNode = testModelTree.findNearestNodeByRunnable(it);
+            assert(isTestLikeNode(testNode));
+            if (isTestNodeAndRunnableMatched(testNode, it)) {
+                updated.push([testNode, it]);
+                deleted.delete(testNode);
+            } else {
+                added.push(it);
             }
         });
-}
 
-function noop() { }
-
-// if a node is test module or target, it is a "flasy leaf".
-// the only true leaf should be test.
-class FalsyLeavesCollector extends WorkspacesVisitor {
-    private constructor() { super(); }
-
-    private static singlton = new FalsyLeavesCollector();
-
-    public static collect(node?: Nodes) {
-        const { singlton } = FalsyLeavesCollector;
-        singlton.result.clear();
-        singlton.apply(node);
-        return Array.from(singlton.result);
+        return {
+            updated,
+            added,
+            deleted,
+        };
     }
 
-    private result: Set<TestModuleNode> = new Set();
+    function isTestLikeNodeInTheSameFile(a: TestLikeNode, b: TestModuleNode) {
+        switch (a.kind) {
+            case NodeKind.TestModule:
+                return a.declarationInfo.uri.toString() === b.definitionUri.toString();
+            case NodeKind.Test:
+                return a.location.uri.toString() === b.definitionUri.toString();
+        }
+    }
 
-    protected override visitCargoWorkspaceNodeCallback = noop;
-    protected override visitCargoPackageNodeCallback = noop;
-    protected override visitTargetNodeCallback = noop;
+    function updateLocationOfTestLikeByRunnable(node: TestLikeNode, runnable: RunnableFacde) {
+        switch (node.kind) {
+            case NodeKind.TestModule:
+                node.declarationInfo = runnable.toTestLocation();
+                break;
+            case NodeKind.Test:
+                node.location = runnable.toTestLocation();
+        }
+    }
+
+    async function addDeclarationModuleRunnableToTestModule(parentNode: TestModuleNode, declarationModuleRunnable: RunnableFacde) {
+        const definition = await getModuleDefinitionLocation(declarationModuleRunnable);
+
+        // Add declarationModule node into the tree
+        const testModule = new TestModuleNode(
+            parentNode,
+            declarationModuleRunnable.testOrSuiteName,
+            declarationModuleRunnable.toTestLocation(),
+            vscode.Uri.parse(definition.targetUri));
+        parentNode.testChildren.add(testModule);
+    }
+
+    function addTestModuleWithItemsRunnablesToTestModule(parentNode: TestModuleNode, runnables: RunnableFacde[]) {
+        // sort to ensure the parent is added before the chidren
+        runnables.sort(RunnableFacde.sortByLabel)
+            .forEach(runnable => {
+                // TODO: Is this slow?
+                const parentNode = testModelTree.findNearestNodeByRunnable(runnable);
+                assert(parentNode.kind === NodeKind.TestModule, "Runable should be inserted into TestModule/Test, we create mock runnable for target/workspace node");
+                if (!parentNode.isRootTestModule()) {
+                    assert(parentNode.name === runnable.testPaths[runnable.testPaths.length - 2]);
+                }
+
+                switch (runnable.testKind) {
+                    case NodeKind.Test:
+                        const testNode = new TestNode(parentNode,
+                            runnable.toTestLocation(),
+                            runnable.testOrSuiteName);
+                        runnableByTestModel.set(testNode, runnable);
+                        parentNode.testChildren.add(testNode);
+                        break;
+                    case NodeKind.TestModule:
+                        const testModuleNode = new TestModuleNode(
+                            parentNode,
+                            runnable.testOrSuiteName,
+                            runnable.toTestLocation(),
+                            runnable.uri,
+                        );
+                        runnableByTestModel.set(testModuleNode, runnable);
+                        parentNode.testChildren.add(testModuleNode);
+                        break;
+                    default:
+                        assertNever(runnable.testKind);
+                }
+            });
+    }
+}
+
+// Get all children of a test-like node
+class ChildrenCollector extends WorkspacesVisitor {
+    constructor(private rootNode: TestLikeNode) {
+        super();
+    }
+
+    public static collect(node: TestLikeNode, includeNodeItself = false) {
+        const it = new ChildrenCollector(node);
+        it.includeNodeItself = includeNodeItself;
+        it.result.clear();
+        it.apply(node);
+        return Array.from(it.result);
+    }
+
+    private includeNodeItself: boolean = false;
+
+    private result: Set<TestLikeNode> = new Set();
 
     protected override visitTestModuleNodeCallback(node: TestModuleNode): void {
-        if (node.testChildren.size === 0) {
+        if (!(node === this.rootNode && !this.includeNodeItself)) {
             this.result.add(node);
         }
     }
 
-    protected override visitTestNodeCallback = noop;
+    protected override visitTestNodeCallback(node: TestNode): void {
+        this.result.add(node);
+    }
 }
 
 const testItemByTestLike = new Map<TestLikeNode, vscode.TestItem>();
@@ -427,8 +544,6 @@ export function getRunnableByTestItem(testItem: vscode.TestItem) {
 // Build vscode.TestItem tree
 // and bind TestModel and vscode.TestItem
 class VscodeTestTreeBuilder extends WorkspacesVisitor {
-    private constructor() { super(); }
-
     private static singlton = new VscodeTestTreeBuilder();
 
     public static build() {
@@ -547,6 +662,9 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         }
         const testItem = testController!.createTestItem(node.name, `$(symbol-module)${node.name}`, node.declarationInfo.uri);
         testItem.range = node.declarationInfo.range;
+        if (node.testChildren.size === 0 && node.declarationInfo.uri.toString() !== node.definitionUri.toString()) {
+            testItem.canResolveChildren = true;
+        }
         this.addTestItemToParentOrRoot(node, testItem);
     }
 
@@ -558,86 +676,8 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
 }
 
 async function getModuleDefinitionLocation(runnable: RunnableFacde) {
-    assert(isTestModuleDeclarationRunnable(runnable));
+    assert(runnable.isTestModuleDeclarationRunnable);
     const definitionLocations = await RaApiHelper.moduleDefinition(runnable.origin.location!);
     assert(definitionLocations?.length === 1, "There should always be one and only one module definition for any module declaration.");
     return definitionLocations[0];
-}
-
-// async function createMockPackageRootRunnable(testMetadata: TestMetadata) {
-//     assert(testMetadata.origin.label === "test-mod ", "The testMetadata should only be direct 'root' level");
-//     const it = await RaApiHelper.parentModue(vscode.Uri.parse(testMetadata.origin.location!.targetUri));
-//     assert(!!it, "should always be cargo file");
-//     assert(it.length === 1, "should be only one cargo file");
-//     const cargoLocationLink = it[0];
-
-//     const packageRunnable: ra.Runnable = {
-//         label: 'test-mod ',
-//         kind: 'cargo',
-//         location: {
-//             targetUri: cargoLocationLink.targetUri,
-//             targetRange: cargoLocationLink.targetRange,
-//             targetSelectionRange: cargoLocationLink.targetSelectionRange,
-//         },
-//         args: {
-//             ...testMetadata.origin.args,
-//             "cargoArgs": [
-//                 "test",
-//                 "--package",
-//                 testMetadata.packageName,
-//                 "--lib",
-//                 "--bins",
-//                 "--tests",
-//             ],
-//             // override the executableArgs, to remove any exiting target
-//             executableArgs: [],
-//         }
-//     };
-
-//     const packgeTestMetadata = new TestMetadata(packageRunnable);
-
-//     return packgeTestMetadata;
-// }
-
-/**
- * Whether the module is a declaration like "mod xxx;"
- */
-function isTestModuleDeclarationRunnable(item: RunnableFacde) {
-    assert(item.testKind === NodeKind.TestModule, "Only compare definition for test module.");
-    return !isTestModuleFileDefinitionRunnable(item)
-        // filter out module with items
-        // Not accurate. But who will write `mode xxx { ... }` in one line?
-        && item.origin.location?.targetRange.end.line === item.origin.location?.targetSelectionRange.end.line;
-}
-
-/**
- * whether the moudle is a definition like "mod xxx { ... }"
- */
-function isTestModuleWithItemsRunnable(item: RunnableFacde) {
-    assert(item.testKind === NodeKind.TestModule, "Only compare definition for test module.");
-    return !isTestModuleFileDefinitionRunnable(item)
-        && !isTestModuleDeclarationRunnable(item);
-}
-
-/**
- * Whether the module is a file module definition.
- */
-function isTestModuleFileDefinitionRunnable(item: RunnableFacde) {
-    const runnable = item.origin;
-    assert(item.testKind === NodeKind.TestModule, "Only compare definition for test module.");
-    assert(!!runnable.location, "Should always have location");
-    return isRangeValueEqual(
-        runnable.location.targetRange,
-        runnable.location.targetSelectionRange,
-    );
-
-    function isRangeValueEqual(a: lc.Range, b: lc.Range) {
-        return isPositiionValueEqual(a.start, b.start)
-            && isPositiionValueEqual(a.end, b.end);
-    }
-
-    function isPositiionValueEqual(a: lc.Position, b: lc.Position) {
-        return a.line === b.line
-            && a.character === b.character;
-    }
 }

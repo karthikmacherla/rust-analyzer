@@ -41,7 +41,7 @@ export namespace TargetKind {
                 default:
                     assertNever(cargoTargetKinds[0]);
             }
-        } else if(cargoTargetKinds.every(it =>
+        } else if (cargoTargetKinds.every(it =>
             CargoTargetKind.isLibraryLike(it))) {
             return TargetKind.Library;
         } else {
@@ -55,12 +55,14 @@ interface Node {
     readonly kind: NodeKind;
 }
 
-export abstract class WorkspacesVisitor {
-    protected abstract visitCargoWorkspaceNodeCallback(node: CargoWorkspaceNode): boolean | void;
-    protected abstract visitCargoPackageNodeCallback(node: CargoPackageNode): boolean | void;
-    protected abstract visitTargetNodeCallback(node: TargetNode): boolean | void;
-    protected abstract visitTestModuleNodeCallback(node: TestModuleNode): boolean | void;
-    protected abstract visitTestNodeCallback(node: TestNode): void;
+export class WorkspacesVisitor {
+    protected constructor() { }
+
+    protected visitCargoWorkspaceNodeCallback(_node: CargoWorkspaceNode): boolean | void { }
+    protected visitCargoPackageNodeCallback(_node: CargoPackageNode): boolean | void { }
+    protected visitTargetNodeCallback(_node: TargetNode): boolean | void { }
+    protected visitTestModuleNodeCallback(_node: TestModuleNode): boolean | void { }
+    protected visitTestNodeCallback(_node: TestNode): void { }
 
     protected apply(node?: Nodes): void {
         switch (node?.kind) {
@@ -216,8 +218,6 @@ function noop() { }
 // if a node is test module or target, it is a "flasy leaf".
 // the only true leaf should be test.
 class UriMatcher extends WorkspacesVisitor {
-    private constructor() { super(); }
-
     private static singlton = new UriMatcher();
 
     private currentUri: vscode.Uri | undefined;
@@ -395,7 +395,7 @@ export class TestModuleNode implements Node {
     readonly parent: TargetNode | TestModuleNode;
     readonly kind = NodeKind.TestModule;
     /// If test module is root of target node, range is all zero
-    readonly declarationInfo: TestLocation;
+    declarationInfo: TestLocation;
     readonly definitionUri: vscode.Uri;
     readonly testChildren: Set<TestLikeNode> = new Set();
 
@@ -424,7 +424,7 @@ export class TestModuleNode implements Node {
 export class TestNode implements Node {
     readonly name: string;
     readonly parent: TestModuleNode;
-    readonly location: TestLocation;
+    location: TestLocation;
     readonly kind = NodeKind.Test;
 
     get testPaths(): string[] {
@@ -455,6 +455,10 @@ export function isTestModuleNode(node: Nodes): node is TestModuleNode {
 
 export function isTestNode(node: Nodes): node is TestNode {
     return node.kind === NodeKind.Test;
+}
+
+export function isTestLikeNode(node: Nodes): node is TestLikeNode {
+    return isTestModuleNode(node) || isTestNode(node);
 }
 
 export function getWorkspaceNodeOfTestModelNode(testModel: Nodes) {

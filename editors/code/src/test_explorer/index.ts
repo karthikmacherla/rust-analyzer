@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { discoverAllFilesInWorkspaces, refreshAllThings, registerWatcherForWorkspaces } from "./discover_and_update";
+import { discoverAllFilesInWorkspaces, refreshAllThings, registerWatcherForWorkspaces, resolveHandler } from "./discover_and_update";
 import { runHandler } from "./run_or_debug";
 
 export let testController: vscode.TestController | undefined;
@@ -35,13 +35,7 @@ export function activeTestController(): void {
     true,
   );
 
-  testController.resolveHandler = async test => {
-    const isFirstTimeToOpenWorkspace = !test;
-    if (isFirstTimeToOpenWorkspace) {
-      registerWatcherForWorkspaces();
-      await discoverAllFilesInWorkspaces();
-    }
-  };
+  testController.resolveHandler = resolveHandler;
 
   testController.refreshHandler = refreshAllThings;
 }

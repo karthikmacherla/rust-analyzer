@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as ra from "../lsp_ext";
+import * as lc from "vscode-languageclient";
 import { assert, assertNever } from "../util";
 import { TargetKind, NodeKind, TestLikeNodeKind, TestLocation } from "./test_model_tree";
 
@@ -138,5 +139,48 @@ export class RunnableFacde {
 
     static sortByLabel(a: RunnableFacde, b: RunnableFacde): number {
         return a.origin.label.localeCompare(b.origin.label);
+    }
+
+    /**
+     * Whether the runnable is a declaration module like "mod xxx;"
+     */
+    get isTestModuleDeclarationRunnable() {
+        assert(this.testKind === NodeKind.TestModule, "Only compare definition for test module.");
+        return !this.isTestModuleFileDefinitionRunnable
+            // filter out module with items
+            // Not accurate. But who will write `mode xxx { ... }` in one line?
+            && this.origin.location?.targetRange.end.line === this.origin.location?.targetSelectionRange.end.line;
+    }
+
+    /**
+     * whether the runnable is a definition module like "mod xxx { ... }"
+     */
+    get isTestModuleWithItemsRunnable() {
+        assert(this.testKind === NodeKind.TestModule, "Only compare definition for test module.");
+        return !this.isTestModuleFileDefinitionRunnable
+            && !this.isTestModuleDeclarationRunnable;
+    }
+
+    /**
+     * Whether the runnable is a file definition module.
+     */
+    get isTestModuleFileDefinitionRunnable() {
+        const runnable = this.origin;
+        assert(this.testKind === NodeKind.TestModule, "Only compare definition for test module.");
+        assert(!!runnable.location, "Should always have location");
+        return isRangeValueEqual(
+            runnable.location.targetRange,
+            runnable.location.targetSelectionRange,
+        );
+
+        function isRangeValueEqual(a: lc.Range, b: lc.Range) {
+            return isPositiionValueEqual(a.start, b.start)
+                && isPositiionValueEqual(a.end, b.end);
+        }
+
+        function isPositiionValueEqual(a: lc.Position, b: lc.Position) {
+            return a.line === b.line
+                && a.character === b.character;
+        }
     }
 }

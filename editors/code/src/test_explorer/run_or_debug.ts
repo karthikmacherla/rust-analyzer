@@ -14,6 +14,7 @@ import { getDebugConfiguration } from "../debug";
 import { raContext } from "../main";
 import { LinesRustOutputAnalyzer, PipeRustcOutputAnalyzer } from "./RustcOutputAnalyzer";
 import { fail } from "assert";
+import { NodeKind } from "./test_model_tree";
 
 export async function runHandler(
     request: vscode.TestRunRequest,
@@ -88,7 +89,7 @@ async function getChosenTestItems(request: vscode.TestRunRequest) {
     return request.include;
 }
 
-async function debugChosenTestItems(testRun: vscode.TestRun,chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
+async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
     if (!raContext) {
         return;
     }
@@ -110,18 +111,18 @@ async function debugChosenTestItems(testRun: vscode.TestRun,chosenTestItems: rea
 
     if (debugConfig.type !== 'lldb') {
         await vscode.window.showInformationMessage("Sorry, for now, only [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) is supported for debugging when using Testing Explorer powered by Rust-Analyzer"
-        + "You can use CodeLens to debug with [MS C++ tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools)"
+            + "You can use CodeLens to debug with [MS C++ tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools)"
         );
         return;
     }
 
-    let tmpFilePath:string|undefined;
+    let tmpFilePath: string | undefined;
 
     if (isFromLacunchJson && debugConfig.stdio) {
         await vscode.window.showInformationMessage("The test choose config from launch.json and you alredy set Stdio Redirection option. We respect it but could not analytics the output.");
     } else {
         const tmpFolderPath = await fs.mkdtemp(path.join(os.tmpdir(), 'ra-test-redirect-'));
-        tmpFilePath =path.join(tmpFolderPath, 'output.txt');
+        tmpFilePath = path.join(tmpFolderPath, 'output.txt');
         debugConfig.stdio = [null, tmpFilePath];
     }
 
@@ -176,19 +177,20 @@ async function debugChosenTestItems(testRun: vscode.TestRun,chosenTestItems: rea
 /**
  * @param chosenTestItems The chosen ones of test items. The test cases which should be run should be the children of them.
  */
-async function runChosenTestItems(testRun: vscode.TestRun,chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
+async function runChosenTestItems(testRun: vscode.TestRun, chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
     assert(chosenTestItems.length === 1, "only support 1 select test item for running, at least for now.");
     const chosenTestItem = chosenTestItems[0];
-    const runnable = getRunnableByTestItem(chosenTestItem).origin;
+    const runnable = getRunnableByTestItem(chosenTestItem);
+    const runnableOrigin = runnable.origin;
 
-    const args = createArgs(runnable);
+    const args = createArgs(runnableOrigin);
 
     // Remove --nocapture, so that we could analytics the output easily and always correctly.
     // Otherwise, if the case writes into stdout, due to the parallel execution,
     // the output might be messy and it might be even impossible to analytic.
     const finalArgs = args.filter(arg => arg !== '--nocapture');
 
-    const cwd = runnable.args.workspaceRoot || ".";
+    const cwd = runnableOrigin.args.workspaceRoot || ".";
 
     assert(finalArgs[0] === 'test', "We only support 'test' command in test explorer for now!");
 
@@ -196,9 +198,13 @@ async function runChosenTestItems(testRun: vscode.TestRun,chosenTestItems: reado
     // overrideCargo: runnable.args.overrideCargo;
     const cargoPath = await toolchain.cargoPath();
 
-    TestControllerHelper.visitTestItemTreePreOrder(testItem => {
-        testRun.enqueued(testItem);
-    }, chosenTestItem.children);
+    if (runnable.testKind === NodeKind.TestModule) {
+        TestControllerHelper.visitTestItemTreePreOrder(testItem => {
+            testRun.enqueued(testItem);
+        }, chosenTestItem.children);
+    } else {
+        testRun.enqueued(chosenTestItem);
+    }
 
     // output the runned command.
     testRun.appendOutput(`${cargoPath} ${finalArgs.join(' ')}`);
@@ -210,7 +216,7 @@ async function runChosenTestItems(testRun: vscode.TestRun,chosenTestItems: reado
         cwd,
         stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
         // FIXME: Should we inheritage the runnableEnv too?
-        env: prepareEnv(runnable, /* config.runnableEnv */undefined),
+        env: prepareEnv(runnableOrigin, /* config.runnableEnv */undefined),
     });
     const stdio = childProcess.stdio;
     stdio[1].on('data', data => outputAnalyzer.onStdOut(data));

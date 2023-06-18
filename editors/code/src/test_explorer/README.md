@@ -1,4 +1,16 @@
-### Issues
+## How it works
+
+### Glossary
+Runnable: Rust Analyzer has an internal structure called "Runnable", which is used to debug/run, which you might already be familar with.
+TestItem: This is the structure used by vscode, and it's the surface of VSCode and RA.
+TestModelNodes: This is a very easy AST, help to store meta info of tests and structure.
+
+### Basic
+Bascially, we maintain TestModel tree and build test items based on TestModel tree and runnables.
+
+
+
+## Issues
 There are many strategies about when to send what requests.
 
 Like the laziness is a big choice. When would you like to load how many tests?

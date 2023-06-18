@@ -9,21 +9,17 @@ import { CargoMetadata } from "../toolchain";
 import { CargoPackageNode, CargoWorkspaceNode, TargetNode, NodeKind, TestModuleNode, testModelTree, isTestModuleNode, WorkspacesVisitor, TestNode, Nodes, TargetKind, TestLikeNode, isTestNode, isTestLikeNode } from "./test_model_tree";
 import { fail } from "assert";
 
-let isInitilized = false;
-
-export async function discoverAllFilesInWorkspaces() {
+async function discoverAllFilesInWorkspaces() {
     if (!vscode.workspace.workspaceFolders) {
-        return; // handle the case of no open folders
+        return;
     }
 
     await refreshCore();
-
-    isInitilized = true;
 }
 
-export function registerWatcherForWorkspaces() {
+function registerWatcherForWorkspaces() {
     if (!vscode.workspace.workspaceFolders) {
-        return; // handle the case of no open folders
+        return;
     }
 
     // listen to document changes to re-parse unsaved changes:
@@ -41,6 +37,19 @@ export function registerWatcherForWorkspaces() {
     vscode.workspace.workspaceFolders
         .map(watchWorkspace);
 }
+
+export async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextEditor | undefined) {
+    if (!e) {
+        return;
+    }
+
+    if (!isRustDocument(e.document)) {
+        return;
+    }
+
+    // as if the file is changed, to update its related info.
+    await handleFileChangeCore(e.document.uri);
+};
 
 function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
     const pattern = new vscode.RelativePattern(workspaceFolder, '**/*.rs');
@@ -76,7 +85,6 @@ const deboundeRefresh = debounce(refreshAllThings, 2000);
 const debounceHandleFileChangeCore = debounce(handleFileChangeCore, 2000);
 
 export async function refreshAllThings() {
-    if (!isInitilized) return;
     await refreshCore();
 }
 
@@ -109,11 +117,11 @@ async function refreshCore() {
     );
 
     for (const uri of allTargetUris) {
-        await updateModelByChangeOfFile(uri);
+        await updateModelOfUri(uri);
     }
 
-    // attach test items
-    updateTestItemsByModel();
+    // try to update all test info in current file
+    await onDidChangeActiveTextEditorForTestExplorer(vscode.window.activeTextEditor);
 }
 
 function filterOutDepdencies(metadata: CargoMetadata) {
@@ -130,12 +138,12 @@ async function handleFileCreate(uri: vscode.Uri) {
     // Maybe we need to a "smart" strategy, when too much files changes in short time,
     // we change to rebuild all.
 
-    await updateModelByChangeOfFile(uri);
+    await updateModelOfUri(uri);
     updateTestItemsByModel();
 }
 
 async function handleFileChangeCore(uri: vscode.Uri) {
-    await updateModelByChangeOfFile(uri);
+    await updateModelOfUri(uri);
     updateTestItemsByModel();
 }
 
@@ -186,16 +194,20 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
         case NodeKind.Test:
             fail("test does not contain any children, and should not be be able to resolve.");
     }
-    batchUpdateTestItemsByModel();
+    VscodeTestTreeBuilder.buildChildrenFor(node);
 };
 
 interface SideEffectFunction {
     (): void;
 }
 
+// This function ensure the side effect function only trigerred once between two macro tasks.
 function batchFunction(f: SideEffectFunction): SideEffectFunction {
     let isBatched = false;
     return (): void => {
+        if (isBatched) {
+            return;
+        }
         isBatched = true;
         setTimeout(() => {
             f();
@@ -234,7 +246,7 @@ async function getNormalizedTestRunnablesInFile(uri: vscode.Uri) {
     }
 }
 
-async function updateModelByChangeOfFile(uri: vscode.Uri) {
+async function updateModelOfUri(uri: vscode.Uri) {
     const runnables = await getNormalizedTestRunnablesInFile(uri);
 
     // Maybe from some to none
@@ -546,13 +558,21 @@ export function getRunnableByTestItem(testItem: vscode.TestItem) {
 class VscodeTestTreeBuilder extends WorkspacesVisitor {
     private static singlton = new VscodeTestTreeBuilder();
 
+    public static buildChildrenFor(node: TestModuleNode) {
+        const { singlton } = VscodeTestTreeBuilder;
+        // not traversal for itself
+        node.testChildren.forEach(child => {
+            singlton.apply(child);
+        });
+    }
+
     public static build() {
         const { singlton } = VscodeTestTreeBuilder;
         testItemByTestLike.clear();
-        singlton.apply();
-        const result = singlton.rootsTestItems;
         singlton.rootsTestItems = [];
         singlton.testItemByNode.clear();
+        singlton.apply();
+        const result = singlton.rootsTestItems;
         return result;
     }
 
@@ -662,7 +682,10 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         }
         const testItem = testController!.createTestItem(node.name, `$(symbol-module)${node.name}`, node.declarationInfo.uri);
         testItem.range = node.declarationInfo.range;
-        if (node.testChildren.size === 0 && node.declarationInfo.uri.toString() !== node.definitionUri.toString()) {
+        const isChildrenFetched = node.testChildren.size !== 0;
+        const isDeclarationModule = node.declarationInfo.uri.toString() !== node.definitionUri.toString();
+
+        if (!isChildrenFetched && isDeclarationModule) {
             testItem.canResolveChildren = true;
         }
         this.addTestItemToParentOrRoot(node, testItem);

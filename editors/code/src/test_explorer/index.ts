@@ -1,11 +1,13 @@
 import * as vscode from "vscode";
-import { discoverAllFilesInWorkspaces, refreshAllThings, registerWatcherForWorkspaces, resolveHandler } from "./discover_and_update";
+import { onDidChangeActiveTextEditorForTestExplorer, refreshAllThings, resolveHandler } from "./discover_and_update";
 import { runHandler } from "./run_or_debug";
 
 export let testController: vscode.TestController | undefined;
+let disposeChangeAcitveTextEditor: vscode.Disposable;
 
 export function deactivateTestController(): void {
   testController?.dispose();
+  disposeChangeAcitveTextEditor.dispose();
   testController = undefined;
 }
 
@@ -34,6 +36,8 @@ export function activeTestController(): void {
     },
     true,
   );
+
+  disposeChangeAcitveTextEditor = vscode.window.onDidChangeActiveTextEditor(onDidChangeActiveTextEditorForTestExplorer);
 
   testController.resolveHandler = resolveHandler;
 

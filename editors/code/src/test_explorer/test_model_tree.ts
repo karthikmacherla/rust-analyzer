@@ -215,8 +215,6 @@ export class WorkspacesRoot {
 
 function noop() { }
 
-// if a node is test module or target, it is a "flasy leaf".
-// the only true leaf should be test.
 class UriMatcher extends WorkspacesVisitor {
     private static singlton = new UriMatcher();
 

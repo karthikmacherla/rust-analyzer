@@ -79,12 +79,11 @@ function debounce(fn: Function, ms: number) {
 // when auto save is enabled, there seems to be 2 events for workspace.onDidChangeTextDocument
 // the first one is for the change of the file, the second one is for the save of the file
 // And usually it takes about 1s between on my machine between the two events
-const deboundeRefresh = debounce(refreshAllThings, 2000);
 
-// FIXME: if there is changes in two files, we will lost the first chagne
+// FIXME: if there are changes in two files, we will lost the first chagne
 const debounceHandleFileChangeCore = debounce(handleFileChangeCore, 2000);
 
-export async function refreshAllThings() {
+export async function refreshHandler() {
     await refreshCore();
 }
 
@@ -100,8 +99,8 @@ async function refreshCore() {
     if (!cargoMetadataArray) return;
 
     // The workspaces got from RA contains depdencies(.i.e, RA does not add "--no-deps" when running `cargo metadata`)
-    // However, tests in depdencies should be ignored.
-    const noDepsWorkspaces = cargoMetadataArray.map(filterOutDepdencies);
+    // But the tests in depdencies should be ignored.
+    const noDepsWorkspaces = cargoMetadataArray.map(filterOutDepdencyPackages);
 
     testModelTree.initByMedatada(noDepsWorkspaces);
 
@@ -122,15 +121,15 @@ async function refreshCore() {
 
     // try to update all test info in current file
     await onDidChangeActiveTextEditorForTestExplorer(vscode.window.activeTextEditor);
-}
 
-function filterOutDepdencies(metadata: CargoMetadata) {
-    return {
-        ...metadata,
-        packages: metadata.packages.filter(p =>
-            metadata.workspace_members.includes(p.id)
-        )
-    };
+    function filterOutDepdencyPackages(metadata: CargoMetadata) {
+        return {
+            ...metadata,
+            packages: metadata.packages.filter(p =>
+                metadata.workspace_members.includes(p.id)
+            )
+        };
+    }
 }
 
 async function handleFileCreate(uri: vscode.Uri) {
@@ -157,8 +156,6 @@ async function handleFileDelete(uri: vscode.Uri) {
     testModelTree.removeTestItemsRecursivelyByUri(uri);
     updateTestItemsByModel();
 }
-
-const batchUpdateTestItemsByModel = batchFunction(updateTestItemsByModel);
 
 export const resolveHandler: vscode.TestController["resolveHandler"] = async function (item) {
     if (!item) {
@@ -196,25 +193,6 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
     }
     VscodeTestTreeBuilder.buildChildrenFor(node);
 };
-
-interface SideEffectFunction {
-    (): void;
-}
-
-// This function ensure the side effect function only trigerred once between two macro tasks.
-function batchFunction(f: SideEffectFunction): SideEffectFunction {
-    let isBatched = false;
-    return (): void => {
-        if (isBatched) {
-            return;
-        }
-        isBatched = true;
-        setTimeout(() => {
-            f();
-            isBatched = false;
-        }, 0);
-    };
-}
 
 function updateTestItemsByModel() {
     testController!.items.replace([]);
@@ -349,7 +327,7 @@ function categorizeRunnables(runnables: RunnableFacde[]) {
 }
 
 /**
- * If node and runnable is matched, they only possible differnce should be location
+ * If node and runnable is matched, the only possible differnce should be location
  * In the other word, the test item build by the test model could be run through this runnable
  */
 function isTestNodeAndRunnableMatched(node: TestLikeNode, runnable: RunnableFacde): node is TestLikeNode {
@@ -460,11 +438,11 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
         parentNode.testChildren.add(testModule);
     }
 
+    // This function will add the descendants of a test module into it
     function addTestModuleWithItemsRunnablesToTestModule(parentNode: TestModuleNode, runnables: RunnableFacde[]) {
         // sort to ensure the parent is added before the chidren
         runnables.sort(RunnableFacde.sortByLabel)
             .forEach(runnable => {
-                // TODO: Is this slow?
                 const parentNode = testModelTree.findNearestNodeByRunnable(runnable);
                 assert(parentNode.kind === NodeKind.TestModule, "Runable should be inserted into TestModule/Test, we create mock runnable for target/workspace node");
                 if (!parentNode.isRootTestModule()) {

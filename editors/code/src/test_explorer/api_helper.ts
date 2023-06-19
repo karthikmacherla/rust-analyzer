@@ -13,9 +13,6 @@ import { assert } from 'console';
  */
 const moduleDefinitionRequest = new lc.RequestType<lc.TextDocumentPositionParams, lc.LocationLink[] | null, void>('textDocument/definition');
 
-/**
- * RA server API helper
- */
 export abstract class RaApiHelper {
     static async getTestRunnablesInFile(uri: vscode.Uri) {
         const client = raContext?.client;

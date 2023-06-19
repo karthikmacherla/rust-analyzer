@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { onDidChangeActiveTextEditorForTestExplorer, refreshAllThings, resolveHandler } from "./discover_and_update";
+import { onDidChangeActiveTextEditorForTestExplorer, refreshHandler, resolveHandler } from "./discover_and_update";
 import { runHandler } from "./run_or_debug";
 
 export let testController: vscode.TestController | undefined;
@@ -41,5 +41,5 @@ export function activeTestController(): void {
 
   testController.resolveHandler = resolveHandler;
 
-  testController.refreshHandler = refreshAllThings;
+  testController.refreshHandler = refreshHandler;
 }

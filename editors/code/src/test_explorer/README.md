@@ -15,9 +15,9 @@ There are many strategies about when to send what requests.
 
 Like the laziness is a big choice. When would you like to load how many tests?
 
-An obvious choice to to load all tests for all projects at the first time, then update the changed files.(this is what's used now)
+An obvious choice to to load all tests for all projects at the first time, then update the changed files.
 
-Another choice is only to load test cases laziness. Only when we open a file or click expand button of the case in test explorer, we load itself and its parents(if they are not loaded yet).
+Another choice is only to load test cases laziness. Only when we open a file or click expand button of the case in test explorer, we load itself and its parents if they are not loaded yet. (this is what's used now, but this might introduce more bugs! Please submit an issue if you met it.)
 
 1. Where should user go when they click "open file" for test module, definition or the declaration?
 
@@ -35,7 +35,7 @@ Because most people know F12(goto implementation), and less people know "locate 
 
 2. How to know whether a test case start? When run the whole test suite, how to know the test case in it is queued or started?
 
-Because the the output is only text(some other framework might provide a server), we could only analytics the output. However, this is unstable and buggy in nature. And we could not always get what we want. In the worst case, we could only guess.
+Because the output is only text(some other framework might provide a server), we could only analytics the output. However, this is unstable and buggy in nature. And we could not always get what we want. In the worst case, we could only guess.
 
 For example
 ```

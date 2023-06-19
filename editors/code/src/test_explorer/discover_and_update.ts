@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import * as vscode from "vscode";
 import { testController } from ".";
+import * as ra from "../lsp_ext";
 import { assert, assertNever, isRustDocument } from "../util";
 import { RaApiHelper } from "./api_helper";
 import { RunnableFacde } from "./RunnableFacde";
@@ -346,7 +347,8 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
     /// updated
     updated.forEach(([testLikeNode, runnable]) => {
         // update the relationship
-        // (although it should be fine to not update, because we only use runnable later to run/debug)
+        // although it should be fine to not update, because we only use runnable later to run/debug
+        // and use the old runnable does not influce the args
         runnableByTestModel.set(testLikeNode, runnable);
         // update the location
         updateLocationOfTestLikeByRunnable(testLikeNode, runnable);
@@ -435,6 +437,7 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
             declarationModuleRunnable.testOrSuiteName,
             declarationModuleRunnable.toTestLocation(),
             vscode.Uri.parse(definition.targetUri));
+        runnableByTestModel.set(testModule, declarationModuleRunnable);
         parentNode.testChildren.add(testModule);
     }
 
@@ -505,27 +508,74 @@ class ChildrenCollector extends WorkspacesVisitor {
 
 const testItemByTestLike = new Map<TestLikeNode, vscode.TestItem>();
 const testModelByTestItem = new WeakMap<vscode.TestItem, Nodes>();
-const runnableByTestModel = new WeakMap<Nodes, RunnableFacde>();
+const runnableByTestModel = new WeakMap<TestLikeNode, RunnableFacde>();
 
-export function getTestItemByTestLikeNode(testLikeNode: TestLikeNode) {
+export function getTestItemByTestLikeNode(testLikeNode: TestLikeNode): vscode.TestItem {
     const testItem = testItemByTestLike.get(testLikeNode);
     assert(!!testItem);
     return testItem;
 }
 
-export function getTestModelByTestItem(testItem: vscode.TestItem) {
+export function getTestModelByTestItem(testItem: vscode.TestItem): Nodes {
     const testModel = testModelByTestItem.get(testItem);
     assert(!!testModel);
     return testModel;
 }
 
-export function getRunnableByTestModel(testModel: Nodes) {
-    const runnable = runnableByTestModel.get(testModel);
-    assert(!!runnable);
-    return runnable;
+function getRunnableByTestModel(testModel: Nodes): RunnableFacde {
+    let testLikeNode: TestLikeNode | undefined;
+    switch (testModel.kind) {
+        case NodeKind.CargoWorkspace:
+            fail("Do not support for now");
+        case NodeKind.CargoPackage:
+            return createMockPackageRootRunnable(testModel);
+        case NodeKind.Target: {
+            testLikeNode = testModel.rootTestModule;
+            const runnable = runnableByTestModel.get(testLikeNode);
+            assert(!!runnable);
+            return runnable;
+        }
+        case NodeKind.TestModule:
+        case NodeKind.Test:
+            testLikeNode = testModel;
+            const runnable = runnableByTestModel.get(testLikeNode);
+            assert(!!runnable);
+            return runnable;
+        default:
+            assertNever(testModel);
+    }
+
+    function createMockPackageRootRunnable(packageNode: CargoPackageNode) {
+        const packageMockRunnable: ra.Runnable = {
+            label: 'test-mod ',
+            kind: 'cargo',
+            location: {
+                targetUri: packageNode.manifestPath.fsPath,
+                targetRange: new vscode.Range(0, 0, 0, 0),
+                targetSelectionRange: new vscode.Range(0, 0, 0, 0),
+            },
+            args: {
+                workspaceRoot: packageNode.parent.workspaceRoot.fsPath,
+                cargoArgs: [
+                    "test",
+                    "--package",
+                    packageNode.name,
+                    "--lib",
+                    "--bins",
+                    "--tests",
+                ],
+                cargoExtraArgs: [],
+                executableArgs: [],
+            }
+        };
+
+        const packgeRunnable = new RunnableFacde(packageMockRunnable);
+
+        return packgeRunnable;
+    }
 }
 
-export function getRunnableByTestItem(testItem: vscode.TestItem) {
+export function getRunnableByTestItem(testItem: vscode.TestItem): RunnableFacde {
     const testModel = getTestModelByTestItem(testItem);
     const runnable = getRunnableByTestModel(testModel);
     return runnable;
@@ -538,7 +588,7 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
 
     public static buildChildrenFor(node: TestModuleNode) {
         const { singlton } = VscodeTestTreeBuilder;
-        // not traversal for itself
+        // not traversal for the node itself
         node.testChildren.forEach(child => {
             singlton.apply(child);
         });

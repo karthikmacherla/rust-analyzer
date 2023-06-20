@@ -7,7 +7,7 @@ import { sep } from 'node:path';
 
 const targetPatternNamedCaptureGroup = {
     /**
-     * like 'src/lib.rs', seprator is os-sensitive
+     * .e.g, 'src/lib.rs', seprator is os-sensitive
      */
     relativePath: 'relativePath',
     /**
@@ -18,8 +18,8 @@ const targetPatternNamedCaptureGroup = {
     normalizedTargetName: 'normalizedTargetName',
 } as const;
 
-// when target is lib/bin, there is "unittests ", when target is integration test, there is not
 const sepInRegexString = sep === '\\' ? '\\\\' : sep;
+// when target is lib/bin, there is "unittests ", when target is integration test, there is not
 const targetPattern = new RegExp(`Running (?:unittests )?(?<${targetPatternNamedCaptureGroup.relativePath}>.*?) \(.*${sepInRegexString}(?<${targetPatternNamedCaptureGroup.normalizedTargetName}>.*?)-.*?\)`);
 
 const caseResultPattern = /^test (.*?) ... (\w*)$/;
@@ -62,7 +62,7 @@ abstract class RustcOutputAnalyzer {
                 this._currentTargetRelativePath!,
                 rustcCasePath);
             if (!testItem) { return; }
-            // TODO: time is only supported in nightly, but we could add them
+            // TODO: time is only avaliable in nightly, should we support it?
             switch (rustcTestResult) {
                 case RustcTestResult.passed:
                     this._testRun.passed(testItem);
@@ -170,21 +170,23 @@ class TestItemLocator {
      */
     findTestItemByRustcOutputCasePath(packageNormalizedName: string, targetRelativePath: string, path: string): vscode.TestItem | undefined {
         // const workspaceRootNode = getWorkspaceNodeOfTestModelNode(this._testModel);
-        const packageNode = getPackageNodeOfTestModelNode(this._testModel);
+        let targetNode = tryGetTargetNodeOfTestModelNode(this._testModel);
+        if (!targetNode) {
+            const packageNode = getPackageNodeOfTestModelNode(this._testModel);
 
-        const targetCandidates =
-            // workspaceRootNode.members
-            // .flatMap(packageNode => Array.from(packageNode.targets))
-            Array.from(packageNode.targets)
-            .filter(target =>
-                normalizeTargetName(target.name) === packageNormalizedName
-                && target.srcPath.fsPath.includes(targetRelativePath)
-            );
+            const targetCandidates =
+                // workspaceRootNode.members
+                // .flatMap(packageNode => Array.from(packageNode.targets))
+                Array.from(packageNode.targets)
+                .filter(target =>
+                    normalizeTargetName(target.name) === packageNormalizedName
+                    && target.srcPath.fsPath.includes(targetRelativePath)
+                );
 
-        assert(targetCandidates.length === 1, "should find one and only one target node, but they might have same name and relative path, although it should be really rare");
-        // REVIEW: What should we do if we found 2 or more candidates?
-
-        const targetNode = targetCandidates[0];
+            assert(targetCandidates.length === 1, "should find one and only one target node, but they might have same name and relative path, although it should be really rare");
+            // REVIEW: What should we do if we found 2 or more candidates?
+            targetNode = targetCandidates[0];
+        }
 
         const testNode = testModelTree.findTestLikeNodeUnderTarget(
             targetNode,
@@ -195,6 +197,15 @@ class TestItemLocator {
         const candidate = getTestItemByTestLikeNode(testNode);
 
         return candidate;
+
+        function tryGetTargetNodeOfTestModelNode(testModel: TestModuleNode | TargetNode | TestNode | CargoPackageNode) {
+            if (testModel.kind === NodeKind.CargoPackage) return undefined;
+            while (testModel.kind !== NodeKind.Target) {
+                testModel = testModel.parent;
+            }
+            return testModel;
+        }
+
     }
 }
 
@@ -217,6 +228,7 @@ export class LinesRustOutputAnalyzer extends RustcOutputAnalyzer {
             this.analyticsTestCaseResult(line);
             this.analyticsStackTrace(line);
         });
+        this._testRun.end();
      }
 }
 

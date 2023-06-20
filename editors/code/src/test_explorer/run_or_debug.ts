@@ -21,6 +21,7 @@ export async function runHandler(
     token: vscode.CancellationToken
 ) {
     // TODO: Never run tests concurrently in client side.
+    // TODO: could not run on workspace/package level, waiting for https://github.com/vadimcn/codelldb/issues/948
 
     const chosenItems = await getChosenTestItems(request);
 
@@ -94,16 +95,18 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
         return;
     }
 
-    await vscode.window.showInformationMessage("The test item status will be updated after debug session is terminated");
+    // Without `await` intentionally, because we don't want to block the UI thread.
+    void vscode.window.showInformationMessage("The test item status will be updated after debug session is terminated");
 
     assert(chosenTestItems.length === 1, "only support 1 select test item for debugging, at least for now.");
     const chosenTestItem = chosenTestItems[0];
-    const runnable = getRunnableByTestItem(chosenTestItem).origin;
+    const runnable = getRunnableByTestItem(chosenTestItem);
+    const runnableOrigin = runnable.origin;
 
     const disposables: vscode.Disposable[] = [];
 
     // most of the following logic comes from vscode-java-test repo. Thanks!
-    const { debugConfig, isFromLacunchJson } = await getDebugConfiguration(raContext, runnable);
+    const { debugConfig, isFromLacunchJson } = await getDebugConfiguration(raContext, runnableOrigin);
 
     if (!debugConfig) {
         return;
@@ -116,14 +119,23 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
         return;
     }
 
-    let tmpFilePath: string | undefined;
+    let outputFilePath: string | undefined;
 
     if (isFromLacunchJson && debugConfig.stdio) {
-        await vscode.window.showInformationMessage("The test choose config from launch.json and you alredy set Stdio Redirection option. We respect it but could not analytics the output.");
+        // Without `await` intentionally, because we don't want to block the UI thread.
+        void vscode.window.showInformationMessage("The test choose config from launch.json and you alredy set Stdio Redirection option. We respect it but could not analytics the output.");
     } else {
         const tmpFolderPath = await fs.mkdtemp(path.join(os.tmpdir(), 'ra-test-redirect-'));
-        tmpFilePath = path.join(tmpFolderPath, 'output.txt');
-        debugConfig.stdio = [null, tmpFilePath];
+        outputFilePath = path.join(tmpFolderPath, 'output.txt');
+        debugConfig.stdio = [null, outputFilePath];
+    }
+
+    if (runnable.testKind === NodeKind.TestModule) {
+        TestControllerHelper.visitTestItemTreePreOrder(testItem => {
+            testRun.enqueued(testItem);
+        }, chosenTestItem.children);
+    } else {
+        testRun.enqueued(chosenTestItem);
     }
 
     let debugSession: vscode.DebugSession | undefined;
@@ -151,15 +163,13 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
             vscode.debug.onDidTerminateDebugSession(async (session: vscode.DebugSession) => {
                 if (debugConfig.name === session.name) {
                     debugSession = undefined;
+                    if (outputFilePath) {
+                        const fileLineContents = (await fs.readFile(outputFilePath, 'utf-8'))
+                            .split(/\r?\n/);
+                        const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
+                        outputAnalyzer.analyticsLines(fileLineContents);
+                    }
                     dispose();
-                    await vscode.window.showWarningMessage("When use debugging, the status of test item will not be updated. Waiting for https://github.com/vadimcn/codelldb/issues/948");
-                    // TODO: wait for https://github.com/vadimcn/codelldb/issues/948
-                    // if (tmpFilePath) {
-                    //     const fileLineContents = (await fs.readFile(tmpFilePath, 'utf-8'))
-                    //         .split(/\r?\n/);
-                    //     const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
-                    //     outputAnalyzer.analyticsLines(fileLineContents);
-                    // }
                     return resolve();
                 }
             }),

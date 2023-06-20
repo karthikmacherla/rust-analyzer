@@ -1426,6 +1426,11 @@
                     "default": false,
                     "type": "boolean"
                 },
+                "rust-analyzer.testExplorer.isEnabled": {
+                    "markdownDescription": "Whether enable test explorer through Rust-Analyzer.",
+                    "default": true,
+                    "type": "boolean"
+                },
                 "rust-analyzer.runnables.command": {
                     "markdownDescription": "Command to be executed instead of 'cargo' for runnables.",
                     "default": null,

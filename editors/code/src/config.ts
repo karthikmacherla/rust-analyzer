@@ -288,6 +288,10 @@ export class Config {
     get showDependenciesExplorer() {
         return this.get<boolean>("showDependenciesExplorer");
     }
+
+    get enableTestExplorer() {
+        return this.get<boolean>("testExplorer.isEnabled");
+    }
 }
 
 // the optional `cb?` parameter is meant to be used to add additional

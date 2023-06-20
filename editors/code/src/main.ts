@@ -52,7 +52,9 @@ export async function activate(
         throw err;
     });
     await setContextValue(RUST_PROJECT_CONTEXT_NAME, true);
-    activeTestController();
+    if (raContext.config.enableTestExplorer) {
+        activeTestController();
+    }
     return api;
 }
 

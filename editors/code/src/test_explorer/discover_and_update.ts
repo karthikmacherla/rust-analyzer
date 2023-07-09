@@ -2,7 +2,7 @@
 import * as vscode from "vscode";
 import { testController } from ".";
 import * as ra from "../lsp_ext";
-import { assert, assertNever, isRustDocument } from "../util";
+import { assert, assertNever, isCargoTomlDocument, isRustDocument } from "../util";
 import { RaApiHelper } from "./api_helper";
 import { RunnableFacde } from "./RunnableFacde";
 import { performance } from "perf_hooks";
@@ -44,7 +44,7 @@ export async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextE
         return;
     }
 
-    if (!isRustDocument(e.document)) {
+    if (!isRustDocument(e.document) && !isCargoTomlDocument(e.document)) {
         return;
     }
 
@@ -52,18 +52,49 @@ export async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextE
     await handleFileChangeCore(e.document.uri);
 };
 
+export const watchers: vscode.FileSystemWatcher[] = [];
+
 function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
-    const pattern = new vscode.RelativePattern(workspaceFolder, '**/*.rs');
-    const watcher = vscode.workspace.createFileSystemWatcher(
-        pattern,
-    );
+    const rsRrojectWatcher = watchRustProjectFileChange(workspaceFolder);
+    const rsFileWatcher = watchRustFileChange(workspaceFolder);
+    watchers.push(rsRrojectWatcher);
+    watchers.push(rsFileWatcher);
 
-    watcher.onDidCreate(handleFileCreate);
-    watcher.onDidChange(handleFileChange);
-    watcher.onDidDelete(handleFileDelete);
+    // For now, the only supported project file is cargo.
+    function watchRustProjectFileChange(workspaceFolder: vscode.WorkspaceFolder): vscode.FileSystemWatcher {
+        const pattern = new vscode.RelativePattern(workspaceFolder, '**/Cargo.toml');
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            pattern,
+        );
+        watcher.onDidCreate(handleRustProjectFileCreate);
+        watcher.onDidChange(handleRustProjectFileChange);
+        watcher.onDidDelete(handleRustProjectFileDelete);
+        return watcher;
+    }
 
-    return watcher;
+    function watchRustFileChange(workspaceFolder: vscode.WorkspaceFolder) {
+        const pattern = new vscode.RelativePattern(workspaceFolder, '**/*.rs');
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            pattern,
+        );
+        watchers.push(watcher);
+        watcher.onDidCreate(handleRustFileCreate);
+        watcher.onDidChange(handleRustFileChange);
+        watcher.onDidDelete(handleRustFileDelete);
+        return watcher;
+    }
 }
+
+// Why choose 2s:
+// when auto save is enabled, there seems to be 2 events for workspace.onDidChangeTextDocument
+// the first one is for the change of the file, the second one is for the save of the file
+// And usually it takes about 1s between on my machine between the two events
+const fileDebounceDelay = 2000;
+
+// TODO: incrementally
+const handleRustProjectFileCreate = debounce(refreshCore, fileDebounceDelay);
+const handleRustProjectFileChange = debounce(refreshCore, fileDebounceDelay);
+const handleRustProjectFileDelete = debounce(refreshCore, fileDebounceDelay);
 
 function debounce(fn: Function, ms: number) {
     let timeout: NodeJS.Timeout | undefined = undefined;
@@ -76,13 +107,9 @@ function debounce(fn: Function, ms: number) {
     };
 }
 
-// Why choose 2s:
-// when auto save is enabled, there seems to be 2 events for workspace.onDidChangeTextDocument
-// the first one is for the change of the file, the second one is for the save of the file
-// And usually it takes about 1s between on my machine between the two events
 
 // FIXME: if there are changes in two files, we will lost the first chagne
-const debounceHandleFileChangeCore = debounce(handleFileChangeCore, 2000);
+const debounceHandleFileChangeCore = debounce(handleFileChangeCore, fileDebounceDelay);
 
 export async function refreshHandler() {
     await refreshCore();
@@ -120,7 +147,7 @@ async function refreshCore() {
         await updateModelOfUri(uri);
     }
 
-    // try to update all test info in current file
+    // update all test info in current file, and trigger build of test item tree
     await onDidChangeActiveTextEditorForTestExplorer(vscode.window.activeTextEditor);
 
     function filterOutDepdencyPackages(metadata: CargoMetadata) {
@@ -133,7 +160,7 @@ async function refreshCore() {
     }
 }
 
-async function handleFileCreate(uri: vscode.Uri) {
+async function handleRustFileCreate(uri: vscode.Uri) {
     console.log(`handleFileCreate triggered for ${uri}`);
     // Maybe we need to a "smart" strategy, when too much files changes in short time,
     // we change to rebuild all.
@@ -147,12 +174,12 @@ async function handleFileChangeCore(uri: vscode.Uri) {
     updateTestItemsByModel();
 }
 
-async function handleFileChange(uri: vscode.Uri) {
+async function handleRustFileChange(uri: vscode.Uri) {
     console.log(`handleFileChange triggered for ${uri}`);
     await debounceHandleFileChangeCore(uri);
 }
 
-async function handleFileDelete(uri: vscode.Uri) {
+async function handleRustFileDelete(uri: vscode.Uri) {
     console.log(`handleFileDelete triggered for ${uri}`);
     testModelTree.removeTestItemsRecursivelyByUri(uri);
     updateTestItemsByModel();

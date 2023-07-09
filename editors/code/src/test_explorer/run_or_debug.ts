@@ -233,7 +233,6 @@ async function runChosenTestItems(testRun: vscode.TestRun, chosenTestItems: read
     stdio[2].on('data', data => outputAnalyzer.onStdErr(data));
     childProcess.on('exit', () => outputAnalyzer.onClose());
     token.onCancellationRequested(() => {
-        console.log(`token cancelled`);
         if (!childProcess.killed) {
             childProcess.kill();
         }

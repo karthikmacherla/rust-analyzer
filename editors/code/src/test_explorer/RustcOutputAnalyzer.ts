@@ -144,7 +144,6 @@ namespace RustcTestResult {
             case 'FAILED':
                 return RustcTestResult.failed;
             default:
-                console.log(`Could not handle result of rustc "${rustcResultString}"`);
                 assert(false, "What should we do if this is changed? Throw error?");
         }
     }
@@ -249,7 +248,6 @@ export class PipeRustcOutputAnalyzer extends RustcOutputAnalyzer {
         const normalizedData = normalizeOutputData(data);
 
         this._testRun.appendOutput(normalizedData);
-        console.log(`StdErr:${data}`);
 
         const lines = normalizedData.split("\r\n");
 
@@ -259,7 +257,6 @@ export class PipeRustcOutputAnalyzer extends RustcOutputAnalyzer {
     }
 
     public onClose() {
-        console.log(`Closed`);
         this._testRun.end();
     }
 
@@ -268,7 +265,6 @@ export class PipeRustcOutputAnalyzer extends RustcOutputAnalyzer {
         const normalizedData = normalizeOutputData(data);
 
         this._testRun.appendOutput(normalizedData);
-        console.log(`Stdout:${data}`);
 
         const lines = normalizedData.split("\r\n");
 

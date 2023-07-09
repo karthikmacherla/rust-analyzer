@@ -31,7 +31,6 @@ function registerWatcherForWorkspaces() {
             return;
         }
 
-        console.log("onDidChangeTextDocument callback");
         debounceHandleFileChangeCore(e.document.uri);
     });
 
@@ -99,7 +98,6 @@ const handleRustProjectFileDelete = debounce(refreshCore, fileDebounceDelay);
 function debounce(fn: Function, ms: number) {
     let timeout: NodeJS.Timeout | undefined = undefined;
     return (...params: any[]) => {
-        console.log("debounce debug: " + performance.now());
         clearTimeout(timeout);
         timeout = setTimeout(() => {
             fn(...params);
@@ -161,7 +159,6 @@ async function refreshCore() {
 }
 
 async function handleRustFileCreate(uri: vscode.Uri) {
-    console.log(`handleFileCreate triggered for ${uri}`);
     // Maybe we need to a "smart" strategy, when too much files changes in short time,
     // we change to rebuild all.
 
@@ -175,19 +172,16 @@ async function handleFileChangeCore(uri: vscode.Uri) {
 }
 
 async function handleRustFileChange(uri: vscode.Uri) {
-    console.log(`handleFileChange triggered for ${uri}`);
     await debounceHandleFileChangeCore(uri);
 }
 
 async function handleRustFileDelete(uri: vscode.Uri) {
-    console.log(`handleFileDelete triggered for ${uri}`);
     testModelTree.removeTestItemsRecursivelyByUri(uri);
     updateTestItemsByModel();
 }
 
 export const resolveHandler: vscode.TestController["resolveHandler"] = async function (item) {
     if (!item) {
-        console.log("From resolve hanlder, init.");
         // init logic
         registerWatcherForWorkspaces();
         await discoverAllFilesInWorkspaces();
@@ -200,7 +194,6 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
         idPath.unshift(tmpItem.parent.id);
         tmpItem = tmpItem.parent;
     }
-    console.log(`Item with ID "${idPath.join("::")}" is running resolve handler`);
     const node = getTestModelByTestItem(item);
     switch (node.kind) {
         case NodeKind.CargoWorkspace:
@@ -211,7 +204,6 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
             fail("The children for target are handled specially. Target is the surface of cargo metadata and front-end life-cycle for now. Eagerly fetch the children to verify whether there is tests or not.");
         case NodeKind.TestModule:
             if (node.testChildren.size > 0) {
-                console.log(`Item with ID "${idPath.join("::")}" does not need to be run, because it already has children`);
                 return;
             }
             await fetchAndUpdateChildrenForTestModuleNode(node);

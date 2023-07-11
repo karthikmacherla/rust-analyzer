@@ -823,7 +823,7 @@ pub(crate) fn handle_runnables(
 pub(crate) fn handle_cargo_workspaces(
     snap: GlobalStateSnapshot,
     _: (),
-) -> Result<Vec<cargo_metadata::Metadata>> {
+) -> anyhow::Result<Vec<cargo_metadata::Metadata>> {
     let _p = profile::span("cargo_workspaces");
     let res = snap
         .workspaces
@@ -842,7 +842,7 @@ pub(crate) fn handle_cargo_workspaces(
 pub(crate) fn handle_test_runnables_in_file(
     snap: GlobalStateSnapshot,
     params: lsp_ext::TestRunnablesInFileParams,
-) -> Result<Vec<lsp_ext::Runnable>> {
+) -> anyhow::Result<Vec<lsp_ext::Runnable>> {
     let _p = profile::span("handle_test_runnables_in_file");
 
     let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;

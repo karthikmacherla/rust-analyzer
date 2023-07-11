@@ -61,6 +61,7 @@ mod interpret_function;
 mod view_item_tree;
 mod shuffle_crate_graph;
 mod fetch_crates;
+mod view_memory_layout;
 
 use std::ffi::OsStr;
 
@@ -75,6 +76,7 @@ use ide_db::{
 };
 use syntax::SourceFile;
 use triomphe::Arc;
+use view_memory_layout::{view_memory_layout, RecursiveMemoryLayout};
 
 use crate::navigation_target::{ToNav, TryToNav};
 
@@ -182,7 +184,7 @@ impl AnalysisHost {
     }
 
     /// NB: this clears the database
-    pub fn per_query_memory_usage(&mut self) -> Vec<(String, profile::Bytes)> {
+    pub fn per_query_memory_usage(&mut self) -> Vec<(String, profile::Bytes, usize)> {
         self.db.per_query_memory_usage()
     }
     pub fn request_cancellation(&mut self) {
@@ -647,7 +649,7 @@ impl Analysis {
         };
 
         self.with_db(|db| {
-            let diagnostic_assists = if include_fixes {
+            let diagnostic_assists = if diagnostics_config.enabled && include_fixes {
                 ide_diagnostics::diagnostics(db, diagnostics_config, &resolve, frange.file_id)
                     .into_iter()
                     .flat_map(|it| it.fixes.unwrap_or_default())
@@ -727,6 +729,13 @@ impl Analysis {
         direction: Direction,
     ) -> Cancellable<Option<TextEdit>> {
         self.with_db(|db| move_item::move_item(db, range, direction))
+    }
+
+    pub fn get_recursive_memory_layout(
+        &self,
+        position: FilePosition,
+    ) -> Cancellable<Option<RecursiveMemoryLayout>> {
+        self.with_db(|db| view_memory_layout(db, position))
     }
 
     /// Performs an operation on the database that may be canceled.

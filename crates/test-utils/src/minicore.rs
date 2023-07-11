@@ -20,6 +20,7 @@
 //!     deref_mut: deref
 //!     deref: sized
 //!     derive:
+//!     discriminant:
 //!     drop:
 //!     eq: sized
 //!     error: fmt
@@ -29,20 +30,25 @@
 //!     future: pin
 //!     generator: pin
 //!     hash:
+//!     include:
 //!     index: sized
 //!     infallible:
+//!     int_impl: size_of, transmute
 //!     iterator: option
 //!     iterators: iterator, fn
 //!     manually_drop: drop
+//!     non_null:
 //!     non_zero:
 //!     option: panic
 //!     ord: eq, option
 //!     panic: fmt
 //!     phantom_data:
 //!     pin:
+//!     pointee:
 //!     range:
 //!     result:
 //!     send: sized
+//!     size_of: sized
 //!     sized:
 //!     slice:
 //!     sync: sized
@@ -125,6 +131,14 @@ pub mod marker {
     #[lang = "phantom_data"]
     pub struct PhantomData<T: ?Sized>;
     // endregion:phantom_data
+
+    // region:discriminant
+    #[lang = "discriminant_kind"]
+    pub trait DiscriminantKind {
+        #[lang = "discriminant_type"]
+        type Discriminant;
+    }
+    // endregion:discriminant
 }
 
 // region:default
@@ -344,6 +358,12 @@ pub mod mem {
         pub fn transmute<Src, Dst>(src: Src) -> Dst;
     }
     // endregion:transmute
+
+    // region:size_of
+    extern "rust-intrinsic" {
+        pub fn size_of<T>() -> usize;
+    }
+    // endregion:size_of
 }
 
 pub mod ptr {
@@ -359,6 +379,27 @@ pub mod ptr {
         *dst = src;
     }
     // endregion:drop
+
+    // region:pointee
+    #[lang = "pointee_trait"]
+    pub trait Pointee {
+        #[lang = "metadata_type"]
+        type Metadata;
+    }
+    // endregion:pointee
+    // region:non_null
+    #[rustc_layout_scalar_valid_range_start(1)]
+    #[rustc_nonnull_optimization_guaranteed]
+    pub struct NonNull<T: ?Sized> {
+        pointer: *const T,
+    }
+    // region:coerce_unsized
+    impl<T: ?Sized, U: ?Sized> crate::ops::CoerceUnsized<NonNull<U>> for NonNull<T> where
+        T: crate::marker::Unsize<U>
+    {
+    }
+    // endregion:coerce_unsized
+    // endregion:non_null
 }
 
 pub mod ops {
@@ -726,6 +767,19 @@ pub mod ops {
     pub trait AddAssign<Rhs = Self> {
         fn add_assign(&mut self, rhs: Rhs);
     }
+
+    // region:builtin_impls
+    macro_rules! add_impl {
+        ($($t:ty)*) => ($(
+            impl const Add for $t {
+                type Output = $t;
+                fn add(self, other: $t) -> $t { self + other }
+            }
+        )*)
+    }
+
+    add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
+    // endregion:builtin_impls
     // endregion:add
 
     // region:generator
@@ -845,29 +899,26 @@ pub mod fmt {
     }
 
     #[lang = "format_argument"]
-    pub struct ArgumentV1<'a> {
+    pub struct Argument<'a> {
         value: &'a Opaque,
         formatter: fn(&Opaque, &mut Formatter<'_>) -> Result,
     }
 
-    impl<'a> ArgumentV1<'a> {
-        pub fn new<'b, T>(x: &'b T, f: fn(&T, &mut Formatter<'_>) -> Result) -> ArgumentV1<'b> {
+    impl<'a> Argument<'a> {
+        pub fn new<'b, T>(x: &'b T, f: fn(&T, &mut Formatter<'_>) -> Result) -> Argument<'b> {
             use crate::mem::transmute;
-            unsafe { ArgumentV1 { formatter: transmute(f), value: transmute(x) } }
+            unsafe { Argument { formatter: transmute(f), value: transmute(x) } }
         }
     }
 
     #[lang = "format_arguments"]
     pub struct Arguments<'a> {
         pieces: &'a [&'static str],
-        args: &'a [ArgumentV1<'a>],
+        args: &'a [Argument<'a>],
     }
 
     impl<'a> Arguments<'a> {
-        pub const fn new_v1(
-            pieces: &'a [&'static str],
-            args: &'a [ArgumentV1<'a>],
-        ) -> Arguments<'a> {
+        pub const fn new_v1(pieces: &'a [&'static str], args: &'a [Argument<'a>]) -> Arguments<'a> {
             Arguments { pieces, args }
         }
     }
@@ -1259,8 +1310,21 @@ mod macros {
         pub macro derive($item:item) {
             /* compiler built-in */
         }
+
+        #[rustc_builtin_macro]
+        pub macro derive_const($item:item) {
+            /* compiler built-in */
+        }
     }
     // endregion:derive
+
+    // region:include
+    #[rustc_builtin_macro]
+    #[macro_export]
+    macro_rules! include {
+        ($file:expr $(,)?) => {{ /* compiler built-in */ }};
+    }
+    // endregion:include
 }
 
 // region:non_zero
@@ -1285,6 +1349,25 @@ impl bool {
 }
 // endregion:bool_impl
 
+// region:int_impl
+macro_rules! impl_int {
+    ($($t:ty)*) => {
+        $(
+            impl $t {
+                pub const fn from_ne_bytes(bytes: [u8; mem::size_of::<Self>()]) -> Self {
+                    unsafe { mem::transmute(bytes) }
+                }
+            }
+        )*
+    }
+}
+
+impl_int! {
+    usize u8 u16 u32 u64 u128
+    isize i8 i16 i32 i64 i128
+}
+// endregion:int_impl
+
 // region:error
 pub mod error {
     #[rustc_has_incoherent_inherent_impls]
@@ -1299,24 +1382,24 @@ pub mod error {
 pub mod prelude {
     pub mod v1 {
         pub use crate::{
-            clone::Clone,                       // :clone
-            cmp::{Eq, PartialEq},               // :eq
-            cmp::{Ord, PartialOrd},             // :ord
-            convert::AsRef,                     // :as_ref
-            convert::{From, Into},              // :from
-            default::Default,                   // :default
-            iter::{IntoIterator, Iterator},     // :iterator
-            macros::builtin::derive,            // :derive
-            marker::Copy,                       // :copy
-            marker::Send,                       // :send
-            marker::Sized,                      // :sized
-            marker::Sync,                       // :sync
-            mem::drop,                          // :drop
-            ops::Drop,                          // :drop
-            ops::{Fn, FnMut, FnOnce},           // :fn
-            option::Option::{self, None, Some}, // :option
-            panic,                              // :panic
-            result::Result::{self, Err, Ok},    // :result
+            clone::Clone,                            // :clone
+            cmp::{Eq, PartialEq},                    // :eq
+            cmp::{Ord, PartialOrd},                  // :ord
+            convert::AsRef,                          // :as_ref
+            convert::{From, Into},                   // :from
+            default::Default,                        // :default
+            iter::{IntoIterator, Iterator},          // :iterator
+            macros::builtin::{derive, derive_const}, // :derive
+            marker::Copy,                            // :copy
+            marker::Send,                            // :send
+            marker::Sized,                           // :sized
+            marker::Sync,                            // :sync
+            mem::drop,                               // :drop
+            ops::Drop,                               // :drop
+            ops::{Fn, FnMut, FnOnce},                // :fn
+            option::Option::{self, None, Some},      // :option
+            panic,                                   // :panic
+            result::Result::{self, Err, Ok},         // :result
         };
     }
 

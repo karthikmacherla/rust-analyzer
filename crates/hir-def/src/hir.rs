@@ -26,7 +26,7 @@ use crate::{
     builtin_type::{BuiltinFloat, BuiltinInt, BuiltinUint},
     path::{GenericArgs, Path},
     type_ref::{Mutability, Rawness, TypeRef},
-    AnonymousConstId, BlockId,
+    BlockId, ConstBlockId,
 };
 
 pub use syntax::ast::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, RangeOp, UnaryOp};
@@ -181,7 +181,7 @@ pub enum Expr {
         statements: Box<[Statement]>,
         tail: Option<ExprId>,
     },
-    Const(AnonymousConstId),
+    Const(ConstBlockId),
     Unsafe {
         id: Option<BlockId>,
         statements: Box<[Statement]>,
@@ -487,26 +487,21 @@ impl BindingAnnotation {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum BindingProblems {
+    /// https://doc.rust-lang.org/stable/error_codes/E0416.html
+    BoundMoreThanOnce,
+    /// https://doc.rust-lang.org/stable/error_codes/E0409.html
+    BoundInconsistently,
+    /// https://doc.rust-lang.org/stable/error_codes/E0408.html
+    NotBoundAcrossAll,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Binding {
     pub name: Name,
     pub mode: BindingAnnotation,
     pub definitions: SmallVec<[PatId; 1]>,
-    /// Id of the closure/generator that owns this binding. If it is owned by the
-    /// top level expression, this field would be `None`.
-    pub owner: Option<ExprId>,
-}
-
-impl Binding {
-    pub fn is_upvar(&self, relative_to: ExprId) -> bool {
-        match self.owner {
-            Some(x) => {
-                // We assign expression ids in a way that outer closures will receive
-                // a lower id
-                x.into_raw() < relative_to.into_raw()
-            }
-            None => true,
-        }
-    }
+    pub problems: Option<BindingProblems>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

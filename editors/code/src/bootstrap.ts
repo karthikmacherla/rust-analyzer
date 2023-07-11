@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import * as os from "os";
-import { Config } from "./config";
+import type { Config } from "./config";
 import { log, isValidExecutable } from "./util";
-import { PersistentState } from "./persistent_state";
+import type { PersistentState } from "./persistent_state";
 import { exec } from "child_process";
 
 export async function bootstrap(
@@ -36,7 +36,7 @@ async function getServer(
     config: Config,
     state: PersistentState
 ): Promise<string | undefined> {
-    const explicitPath = process.env.__RA_LSP_SERVER_DEBUG ?? config.serverPath;
+    const explicitPath = process.env["__RA_LSP_SERVER_DEBUG"] ?? config.serverPath;
     if (explicitPath) {
         if (explicitPath.startsWith("~/")) {
             return os.homedir() + explicitPath.slice("~".length);

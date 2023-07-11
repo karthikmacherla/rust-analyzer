@@ -213,6 +213,28 @@ pub trait AttrsOwnerEdit: ast::HasAttrs {
             }
         }
     }
+
+    fn add_attr(&self, attr: ast::Attr) {
+        add_attr(self.syntax(), attr);
+
+        fn add_attr(node: &SyntaxNode, attr: ast::Attr) {
+            let indent = IndentLevel::from_node(node);
+            attr.reindent_to(indent);
+
+            let after_attrs_and_comments = node
+                .children_with_tokens()
+                .find(|it| !matches!(it.kind(), WHITESPACE | COMMENT | ATTR))
+                .map_or(Position::first_child_of(node), |it| Position::before(it));
+
+            ted::insert_all(
+                after_attrs_and_comments,
+                vec![
+                    attr.syntax().clone().into(),
+                    make::tokens::whitespace(&format!("\n{indent}")).into(),
+                ],
+            )
+        }
+    }
 }
 
 impl<T: ast::HasAttrs> AttrsOwnerEdit for T {}
@@ -673,12 +695,6 @@ fn get_or_insert_comma_after(syntax: &SyntaxNode) -> SyntaxToken {
             ted::insert(Position::after(syntax), &comma);
             comma
         }
-    }
-}
-
-impl ast::StmtList {
-    pub fn push_front(&self, statement: ast::Stmt) {
-        ted::insert(Position::after(self.l_curly_token().unwrap()), statement.syntax());
     }
 }
 

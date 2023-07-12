@@ -76,14 +76,12 @@ export interface CargoPackageMetadata {
 }
 
 export interface CargoTargetMetadata {
-    /**
-     * In which situation could this contain not one element?
-     */
     kind: CargoTargetKind[];
     name: string;
     crate_types: CargoCrateType[];
     src_path: string;
 }
+
 export interface ArtifactSpec {
     cargoArgs: string[];
     filter?: (artifacts: CompilationArtifact[]) => CompilationArtifact[];

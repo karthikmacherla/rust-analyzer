@@ -530,6 +530,9 @@ config_data! {
         /// Show documentation.
         signatureInfo_documentation_enable: bool                       = "true",
 
+        /// Enable VSCode native test explorer.
+        testExplorer_isEnabled: bool = "true",
+
         /// Whether to insert closing angle brackets when typing an opening angle bracket of a generic argument list.
         typing_autoClosingAngleBrackets_enable: bool = "false",
 

@@ -1,10 +1,7 @@
 /// This mod is mainly to support vscode native test extension
 /// please reference: https://code.visualstudio.com/api/extension-guides/testing
 // It's a pretty rough implementation for now, reuse a lot of logic from runnable.
-use ide_db::{
-    base_db::{FileId},
-    RootDatabase,
-};
+use ide_db::{base_db::FileId, RootDatabase};
 
 use crate::{runnables::runnables, Runnable, RunnableKind};
 

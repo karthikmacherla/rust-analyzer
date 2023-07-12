@@ -32,8 +32,8 @@ pub struct CargoWorkspace {
     targets: Arena<TargetData>,
     workspace_root: AbsPathBuf,
     target_directory: AbsPathBuf,
-    // Hack, this should be an implmentation detail, however, 
-    // sometimes it's useful to let the client know the project 
+    // Hack, this should be an implmentation detail, however,
+    // sometimes it's useful to let the client know the project
     // structure.
     // This property should only be used as JSON
     pub origin_metadata: cargo_metadata::Metadata,

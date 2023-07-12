@@ -356,9 +356,9 @@ pub struct TestInfo {
     pub runnable: Runnable,
 }
 
-pub enum CargoWorkspaces{}
+pub enum CargoWorkspaces {}
 
-impl Request for CargoWorkspaces{
+impl Request for CargoWorkspaces {
     type Params = ();
     type Result = Vec<cargo_metadata::Metadata>;
     const METHOD: &'static str = "rust-analyzer/cargoWorkspaces";

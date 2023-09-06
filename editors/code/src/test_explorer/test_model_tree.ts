@@ -1,8 +1,8 @@
-import path = require("node:path");
+import * as path from "node:path";
 import * as vscode from 'vscode';
-import { CargoMetadata, CargoPackageMetadata, CargoTargetKind, CargoTargetMetadata } from "../toolchain";
+import { type CargoMetadata, type CargoPackageMetadata, CargoTargetKind, type CargoTargetMetadata } from "../toolchain";
 import { assert, assertNever } from "../util";
-import { RunnableFacde } from "./RunnableFacde";
+import type { RunnableFacde } from "./RunnableFacde";
 import { fail } from "node:assert";
 
 export enum NodeKind {
@@ -23,6 +23,7 @@ export enum TargetKind {
 export namespace TargetKind {
     export function from(cargoTargetKinds: CargoTargetKind[]) {
         if (cargoTargetKinds.length === 1) {
+            assert(!!cargoTargetKinds[0], "We have checked the length, just to narrow type for ts.");
             switch (cargoTargetKinds[0]) {
                 case CargoTargetKind.Binary:
                     return TargetKind.Binary;
@@ -51,11 +52,16 @@ export namespace TargetKind {
 }
 
 interface Node {
+    /**
+     * The parent of the node.
+     *
+     * `undefined` only if the node is root of the tree.
+     */
     readonly parent: Node | undefined;
     readonly kind: NodeKind;
 }
 
-export class WorkspacesVisitor {
+export abstract class WorkspacesVisitor {
     protected constructor() { }
 
     protected visitCargoWorkspaceNodeCallback(_node: CargoWorkspaceNode): boolean | void { }
@@ -102,8 +108,8 @@ export class WorkspacesVisitor {
 
     private visitTargetNode(targetNode: TargetNode) {
         if (this.visitTargetNodeCallback(targetNode)) { return; };
-        if (targetNode.rootTestModule) {
-            this.visitTestModuleNode(targetNode.rootTestModule);
+        if (targetNode.dummyTestModule) {
+            this.visitTestModuleNode(targetNode.dummyTestModule);
         }
     }
 
@@ -131,7 +137,7 @@ export class WorkspacesVisitor {
 // The vscode-test-items-tree is view
 // CargoWorkspaceNode is model
 // This is controller-like, but it does not have any IO
-export class WorkspacesRoot {
+class WorkspacesRoot {
     readonly roots: CargoWorkspaceNode[] = [];
 
     clear() {
@@ -169,7 +175,7 @@ export class WorkspacesRoot {
             return packageNode;
         }
 
-        assert(!!targetNode.rootTestModule);
+        assert(!!targetNode.dummyTestModule);
 
         return this.findTestLikeNodeUnderTarget(targetNode, testKind, testPaths);
     }
@@ -178,7 +184,7 @@ export class WorkspacesRoot {
     findTestLikeNodeUnderTarget(targetNode: TargetNode, testLevel: NodeKind.Test, testPaths: string[]): TestNode;
     findTestLikeNodeUnderTarget(targetNode: TargetNode, testLevel: TestLikeNodeKind, testPaths: string[]): TestLikeNode;
     findTestLikeNodeUnderTarget(targetNode: TargetNode, testLevel: TestLikeNodeKind, testPaths: string[]): TestLikeNode {
-        let testModuleNode: TestModuleNode = targetNode.rootTestModule;
+        let testModuleNode: TestModuleNode = targetNode.dummyTestModule;
 
         for (let index = 0; index < testPaths.length; index += 1) {
             const testModuleNmae = testPaths[index];
@@ -213,8 +219,6 @@ export class WorkspacesRoot {
     }
 }
 
-function noop() { }
-
 class UriMatcher extends WorkspacesVisitor {
     private static singlton = new UriMatcher();
 
@@ -230,10 +234,6 @@ class UriMatcher extends WorkspacesVisitor {
 
     private result: Set<TestModuleNode> = new Set();
 
-    protected override visitCargoWorkspaceNodeCallback = noop;
-    protected override visitCargoPackageNodeCallback = noop;
-    protected override visitTargetNodeCallback = noop;
-
     protected override visitTestModuleNodeCallback(node: TestModuleNode): boolean {
         assert(!!this.currentUri);
         if (node.definitionUri.toString() === this.currentUri.toString()) {
@@ -242,8 +242,6 @@ class UriMatcher extends WorkspacesVisitor {
         }
         return false;
     }
-
-    protected override visitTestNodeCallback = noop;
 }
 
 function removeRecursively(node: TestLikeNode) {
@@ -349,7 +347,7 @@ export class TargetNode implements Node {
     readonly name: string;
     readonly srcPath: vscode.Uri;
     readonly targetKind: TargetKind;
-    rootTestModule: TestModuleNode;
+    dummyTestModule: TestModuleNode;
 
     static from(targetMetadata: CargoTargetMetadata, parent: CargoPackageNode): TargetNode | undefined {
         const targetKind = TargetKind.from(targetMetadata.kind);
@@ -364,7 +362,7 @@ export class TargetNode implements Node {
         this.targetKind = targetKind;
         this.name = name;
         this.srcPath = vscode.Uri.file(srcPath);
-        this.rootTestModule = new TestModuleNode(
+        this.dummyTestModule = new TestModuleNode(
             this,
             '',
             {
@@ -379,7 +377,7 @@ export type TestLikeNode = TestModuleNode | TestNode;
 export type TestLikeNodeKind = NodeKind.TestModule | NodeKind.Test;
 
 /**
- * Nodes which has a linked "rs" file.
+ * Nodes which has a mapping rust file.
  */
 type RsNode = TestLikeNode | TargetNode;
 
@@ -389,16 +387,23 @@ export interface TestLocation {
 }
 
 export class TestModuleNode implements Node {
+    /**
+     * Name of the test module
+     *
+     * A {@link TargetNode} contains a dummy test module, which has an empty name.
+     */
     readonly name: string;
     readonly parent: TargetNode | TestModuleNode;
     readonly kind = NodeKind.TestModule;
     /// If test module is root of target node, range is all zero
+    // TODO: consider about `path`, this could be an array in fact
+    // But it requires to change the server code to fully support it.
     declarationInfo: TestLocation;
     readonly definitionUri: vscode.Uri;
     readonly testChildren: Set<TestLikeNode> = new Set();
 
     get testPaths(): string[] {
-        if (this.isRootTestModule()) {
+        if (this.isDummyTestModule()) {
             return [];
         }
 
@@ -414,7 +419,7 @@ export class TestModuleNode implements Node {
         this.name = name;
     }
 
-    public isRootTestModule() {
+    public isDummyTestModule() {
         return this.parent.kind === NodeKind.Target;
     }
 }

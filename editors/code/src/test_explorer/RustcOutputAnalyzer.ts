@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import * as vscode from "vscode";
 import { assert, assertNever } from "../util";
 import { getTestItemByTestLikeNode, getTestModelByTestItem } from "./discover_and_update";
@@ -212,6 +211,9 @@ function normalizeTargetName(packageName: string) {
     return packageName.replace(/-/g, '_');
 }
 
+/**
+ * This analyzer analytics the output of Rustc, it assumes the output is line by line(No CR/LF, each line is a string)
+ */
 export class LinesRustOutputAnalyzer extends RustcOutputAnalyzer {
     constructor(
         testRun: vscode.TestRun,
@@ -244,7 +246,7 @@ export class PipeRustcOutputAnalyzer extends RustcOutputAnalyzer {
         // like "Finished test [unoptimized + debuginfo] target(s) in 0.07s"
         // and "Running unittests src\lib.rs (target\debug\deps\hashbrown-3547e1bc587fc63a.exe)"
 
-        // And this make ir hard to use breakpoint to debug, because the buffer will be flushed in unexpected order.
+        // And this make it hard to use breakpoint to debug, because the buffer will be flushed in unexpected order.
         const normalizedData = normalizeOutputData(data);
 
         this._testRun.appendOutput(normalizedData);

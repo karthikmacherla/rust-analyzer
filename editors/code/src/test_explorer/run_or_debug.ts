@@ -9,7 +9,7 @@ import { spawn } from "child_process";
 import { assert } from "../util";
 import { createArgs, prepareEnv } from "../run";
 import { getRunnableByTestItem } from "./discover_and_update";
-import { TestControllerHelper } from "./TestControllerHelper";
+import { TestItemControllerHelper } from "./TestItemControllerHelper";
 import { getDebugConfiguration } from "../debug";
 import { raContext } from "../main";
 import { LinesRustOutputAnalyzer, PipeRustcOutputAnalyzer } from "./RustcOutputAnalyzer";
@@ -99,7 +99,7 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
     void vscode.window.showInformationMessage("The test item status will be updated after debug session is terminated");
 
     assert(chosenTestItems.length === 1, "only support 1 select test item for debugging, at least for now.");
-    const chosenTestItem = chosenTestItems[0];
+    const chosenTestItem = chosenTestItems[0]!; // safe, because we have checked the length.
     const runnable = getRunnableByTestItem(chosenTestItem);
     const runnableOrigin = runnable.origin;
 
@@ -121,17 +121,17 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
 
     let outputFilePath: string | undefined;
 
-    if (isFromLacunchJson && debugConfig.stdio) {
+    if (isFromLacunchJson && debugConfig["stdio"]) {
         // Without `await` intentionally, because we don't want to block the UI thread.
         void vscode.window.showInformationMessage("The test choose config from launch.json and you alredy set Stdio Redirection option. We respect it but could not analytics the output.");
     } else {
         const tmpFolderPath = await fs.mkdtemp(path.join(os.tmpdir(), 'ra-test-redirect-'));
         outputFilePath = path.join(tmpFolderPath, 'output.txt');
-        debugConfig.stdio = [null, outputFilePath];
+        debugConfig["stdio"] = [null, outputFilePath];
     }
 
     if (runnable.testKind === NodeKind.TestModule) {
-        TestControllerHelper.visitTestItemTreePreOrder(testItem => {
+        TestItemControllerHelper.visitTestItemTreePreOrder(testItem => {
             testRun.enqueued(testItem);
         }, chosenTestItem.children);
     } else {
@@ -189,7 +189,7 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
  */
 async function runChosenTestItems(testRun: vscode.TestRun, chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
     assert(chosenTestItems.length === 1, "only support 1 select test item for running, at least for now.");
-    const chosenTestItem = chosenTestItems[0];
+    const chosenTestItem = chosenTestItems[0]!; // safe, because we have checked the length.
     const runnable = getRunnableByTestItem(chosenTestItem);
     const runnableOrigin = runnable.origin;
 
@@ -209,7 +209,7 @@ async function runChosenTestItems(testRun: vscode.TestRun, chosenTestItems: read
     const cargoPath = await toolchain.cargoPath();
 
     if (runnable.testKind === NodeKind.TestModule) {
-        TestControllerHelper.visitTestItemTreePreOrder(testItem => {
+        TestItemControllerHelper.visitTestItemTreePreOrder(testItem => {
             testRun.enqueued(testItem);
         }, chosenTestItem.children);
     } else {

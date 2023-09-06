@@ -4,7 +4,7 @@ import { testController } from ".";
 /**
  * General helper functions for VSCode TestItemController
  */
-export abstract class TestControllerHelper {
+export abstract class TestItemControllerHelper {
     /**
      *
      * @param cb Stop serach the current subtree if returning non-falsy value. But the rest subtree will continute to search.
@@ -21,7 +21,7 @@ export abstract class TestControllerHelper {
                 exitCb?.(item, collection);
                 return;
             }
-            TestControllerHelper.visitTestItemTreePreOrder(cb, item.children, exitCb);
+            TestItemControllerHelper.visitTestItemTreePreOrder(cb, item.children, exitCb);
             exitCb?.(item, collection);
         });
     }

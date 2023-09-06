@@ -26,18 +26,14 @@ export function activeTestController(): void {
   testController.createRunProfile(
     'Run',
     vscode.TestRunProfileKind.Run,
-    async (request, token) => {
-      await runHandler(request, token);
-    },
+    runHandler,
     true,
   );
 
   testController.createRunProfile(
     'Debug',
     vscode.TestRunProfileKind.Debug,
-    async (request, token) => {
-      await runHandler(request, token);
-    },
+    runHandler,
     true,
   );
 

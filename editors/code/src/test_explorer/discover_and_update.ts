@@ -1,13 +1,26 @@
-/* eslint-disable no-console */
 import * as vscode from "vscode";
 import { testController } from ".";
-import * as ra from "../lsp_ext";
+import type * as ra from "../lsp_ext";
 import { assert, assertNever, isCargoTomlDocument, isRustDocument } from "../util";
 import { RaApiHelper } from "./api_helper";
 import { RunnableFacde } from "./RunnableFacde";
-import { performance } from "perf_hooks";
-import { CargoMetadata } from "../toolchain";
-import { CargoPackageNode, CargoWorkspaceNode, TargetNode, NodeKind, TestModuleNode, testModelTree, isTestModuleNode, WorkspacesVisitor, TestNode, Nodes, TargetKind, TestLikeNode, isTestNode, isTestLikeNode } from "./test_model_tree";
+import type { CargoMetadata } from "../toolchain";
+import {
+    type CargoPackageNode,
+    type CargoWorkspaceNode,
+    TargetNode,
+    NodeKind,
+    TestModuleNode,
+    testModelTree,
+    isTestModuleNode,
+    WorkspacesVisitor,
+    TestNode,
+    type Nodes,
+    TargetKind,
+    type TestLikeNode,
+    isTestNode,
+    isTestLikeNode,
+} from "./test_model_tree";
 import { fail } from "assert";
 
 async function discoverAllFilesInWorkspaces() {
@@ -76,7 +89,6 @@ function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
         const watcher = vscode.workspace.createFileSystemWatcher(
             pattern,
         );
-        watchers.push(watcher);
         watcher.onDidCreate(handleRustFileCreate);
         watcher.onDidChange(handleRustFileChange);
         watcher.onDidDelete(handleRustFileDelete);
@@ -84,16 +96,19 @@ function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
     }
 }
 
-// Why choose 2s:
+// Why 2 seconds:
 // when auto save is enabled, there seems to be 2 events for workspace.onDidChangeTextDocument
 // the first one is for the change of the file, the second one is for the save of the file
 // And usually it takes about 1s between on my machine between the two events
-const fileDebounceDelay = 2000;
+const FILE_DEBOUNCE_DELAY_MS = 2000;
 
-// TODO: incrementally
-const handleRustProjectFileCreate = debounce(refreshCore, fileDebounceDelay);
-const handleRustProjectFileChange = debounce(refreshCore, fileDebounceDelay);
-const handleRustProjectFileDelete = debounce(refreshCore, fileDebounceDelay);
+// refresh all things if the project file is changed
+// Because we do not know whther the change would
+//     - change packages
+//     - change targets(.e.g, changing bin file path)
+const handleRustProjectFileCreate = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
+const handleRustProjectFileChange = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
+const handleRustProjectFileDelete = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
 
 function debounce(fn: Function, ms: number) {
     let timeout: NodeJS.Timeout | undefined = undefined;
@@ -105,9 +120,8 @@ function debounce(fn: Function, ms: number) {
     };
 }
 
-
 // FIXME: if there are changes in two files, we will lost the first chagne
-const debounceHandleFileChangeCore = debounce(handleFileChangeCore, fileDebounceDelay);
+const debounceHandleFileChangeCore = debounce(handleFileChangeCore, FILE_DEBOUNCE_DELAY_MS);
 
 export async function refreshHandler() {
     await refreshCore();
@@ -117,6 +131,7 @@ async function refreshCore() {
     if (!testController) return;
 
     // Discard all
+    // should we discard the old model tree here? should the user see the previous test items when refreshing?
     // testController.items.replace([]);
     testModelTree.clear();
 
@@ -215,9 +230,10 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
 };
 
 function updateTestItemsByModel() {
-    testController!.items.replace([]);
+    assert(!!testController);
+    testController.items.replace([]);
     const rootTestItems = VscodeTestTreeBuilder.build();
-    testController!.items.replace(rootTestItems);
+    testController.items.replace(rootTestItems);
 }
 
 async function getNormalizedTestRunnablesInFile(uri: vscode.Uri) {
@@ -264,7 +280,7 @@ async function updateModelOfUri(uri: vscode.Uri) {
     assert(testModuelRunnables.length + testItemRunnables.length === runnables.length);
 
     // FIXME: should be file test modules, because of `path` attribute
-    const fileTestModuleRunnbale = testModuelRunnables[0];
+    const fileTestModuleRunnbale = testModuelRunnables[0]!;
 
     const nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
 
@@ -313,7 +329,7 @@ async function updateModelOfUri(uri: vscode.Uri) {
 
 async function fetchAndUpdateChildrenForTestModuleNode(testModuleNode: TestModuleNode) {
     assert(
-        testModuleNode.isRootTestModule() ===
+        testModuleNode.isDummyTestModule() ===
         (testModuleNode.declarationInfo.uri.toString() === testModuleNode.definitionUri.toString())
         , "if the test module is not a declaration module, it must be the root module of some target node");
 
@@ -356,9 +372,9 @@ function isTestNodeAndRunnableMatched(node: TestLikeNode, runnable: RunnableFacd
 
 /**
  * Update test module's children with new fetched runnables
- * 
- * @param parentNode 
- * @param runnables 
+ *
+ * @param parentNode
+ * @param runnables
  */
 async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleNode, runnables: RunnableFacde[]) {
     const { added, deleted, updated } = distinguishChanges(runnables);
@@ -467,7 +483,7 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
             .forEach(runnable => {
                 const parentNode = testModelTree.findNearestNodeByRunnable(runnable);
                 assert(parentNode.kind === NodeKind.TestModule, "Runable should be inserted into TestModule/Test, we create mock runnable for target/workspace node");
-                if (!parentNode.isRootTestModule()) {
+                if (!parentNode.isDummyTestModule()) {
                     assert(parentNode.name === runnable.testPaths[runnable.testPaths.length - 2]);
                 }
 
@@ -549,7 +565,7 @@ function getRunnableByTestModel(testModel: Nodes): RunnableFacde {
         case NodeKind.CargoPackage:
             return createMockPackageRootRunnable(testModel);
         case NodeKind.Target: {
-            testLikeNode = testModel.rootTestModule;
+            testLikeNode = testModel.dummyTestModule;
             const runnable = runnableByTestModel.get(testLikeNode);
             assert(!!runnable);
             return runnable;
@@ -723,7 +739,7 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
     }
 
     protected override visitTestModuleNodeCallback(node: TestModuleNode) {
-        if (node.isRootTestModule()) {
+        if (node.isDummyTestModule()) {
             // not create test item for root test module, which is representated by corresponding target node.
             return;
         }
@@ -749,5 +765,5 @@ async function getModuleDefinitionLocation(runnable: RunnableFacde) {
     assert(runnable.isTestModuleDeclarationRunnable);
     const definitionLocations = await RaApiHelper.moduleDefinition(runnable.origin.location!);
     assert(definitionLocations?.length === 1, "There should always be one and only one module definition for any module declaration.");
-    return definitionLocations[0];
+    return definitionLocations[0]!; // safe, for we have checked the length
 }

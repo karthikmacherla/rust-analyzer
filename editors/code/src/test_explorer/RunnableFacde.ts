@@ -1,9 +1,12 @@
 import * as vscode from "vscode";
-import * as ra from "../lsp_ext";
-import * as lc from "vscode-languageclient";
+import type * as ra from "../lsp_ext";
+import type * as lc from "vscode-languageclient";
 import { assert, assertNever } from "../util";
-import { TargetKind, NodeKind, TestLikeNodeKind, TestLocation } from "./test_model_tree";
+import { TargetKind, NodeKind, type TestLikeNodeKind, type TestLocation } from "./test_model_tree";
 
+/**
+ * A wrapper of `ra.Runnable` to provide typed/cached information rather than string.
+ */
 export class RunnableFacde {
     public readonly origin: ra.Runnable;
 
@@ -63,12 +66,16 @@ export class RunnableFacde {
     }
 
     get testPaths(): string[] {
-        const testModulePath = this.origin.label.split(' ')[1];
+        const testModulePath = this.origin.label.split(' ')[1]!;
         return testModulePath.split('::');
     }
 
     get testOrSuiteName(): string {
-        return this.testPaths[this.testPaths.length - 1];
+        const candidateName = this.testPaths[this.testPaths.length - 1];
+        // It should be safe,
+        // - if it's a test, this is its name
+        // - if it's a test module, this is the name of module
+        return candidateName!;
     }
 
     private _targetKind?: TargetKind;
@@ -92,9 +99,10 @@ export class RunnableFacde {
     get packageName(): string {
         if (this._packageName) { return this._packageName; }
         const packageQualifiedNameIndex = this.origin.args.cargoArgs.findIndex(arg => arg === "--package") + 1;
-        // The format of packageQualifiedName is name:version, like hello:1.2.3.
+        // The format of `packageQualifiedName` is `name:version`, like `hello:1.2.3`
         const packageQualifiedName = this.origin.args.cargoArgs[packageQualifiedNameIndex];
-        return this._packageName = packageQualifiedName.split(':')[0];
+        assert(!!packageQualifiedName, "There should be a value for '--package' in runnable");
+        return this._packageName = packageQualifiedName.split(':')[0]!;
     }
 
     private _integrationTestFileName?: string | null;
@@ -109,6 +117,7 @@ export class RunnableFacde {
             this._integrationTestFileName = null;
         } else {
             this._integrationTestFileName = this.origin.args.cargoArgs[integrationTestFileNameIndex];
+            assert(typeof this._integrationTestFileName === "string","There should be a value for '--test' in runnable");
         }
         return this._integrationTestFileName;
     }
@@ -125,6 +134,7 @@ export class RunnableFacde {
             this._binaryTestFileName = null;
         } else {
             this._binaryTestFileName = this.origin.args.cargoArgs[integrationTestFileNameIndex];
+            assert(typeof this._binaryTestFileName === "string","There should be a value for '--bin' in runnable");
         }
         return this._binaryTestFileName;
     }

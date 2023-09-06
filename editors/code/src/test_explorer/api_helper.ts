@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import { raContext } from '../main';
 import * as ra from "../lsp_ext";
 import * as lc from "vscode-languageclient";
@@ -60,7 +60,7 @@ export abstract class RaApiHelper {
 
     /**
      *
-     * @returns cargo workspaces for different folders with depends. One RA instance could support multi different workspaces.
+     * @returns cargo workspaces with depdencies. One RA instance could support multi different workspaces.
      */
     static async cargoWorkspaces() {
         const client = raContext?.client;

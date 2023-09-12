@@ -1,7 +1,15 @@
 import * as vscode from "vscode";
 import { assert, assertNever } from "../util";
 import { getTestItemByTestLikeNode, getTestModelByTestItem } from "./discover_and_update";
-import { CargoPackageNode, NodeKind, Nodes, TargetNode, TestModuleNode, TestNode, getPackageNodeOfTestModelNode, getWorkspaceNodeOfTestModelNode, testModelTree } from "./test_model_tree";
+import {
+    type CargoPackageNode,
+    DummyRootNode,
+    NodeKind,
+    type TargetNode,
+    type TestModuleNode,
+    type TestNode,
+    getPackageNodeOfTestModelNode,
+} from "./test_model_tree";
 import { sep } from 'node:path';
 
 const targetPatternNamedCaptureGroup = {
@@ -93,23 +101,28 @@ abstract class RustcOutputAnalyzer {
             this._failureContextAnalyticsFlag = true;
             return;
         }
+
         if (this._failureContextAnalyticsFlag && stacktraceEndPattern.test(line)) {
             this._failureContextAnalyticsFlag = false;
             this.flushStackTraceAnalytics();
             return;
         }
+
         if (this._failureContextAnalyticsFlag) {
             const match = stacktraceTestCasePattern.exec(line);
             const rustcCasePath = match?.[1];
+
             if (rustcCasePath) {
                 const testItem = this._testItemLocator.findTestItemByRustcOutputCasePath(
                     this._currentNormalizedTargetName!,
                     this._currentTargetRelativePath!,
                     rustcCasePath);
+
                 if (!testItem) { assert(false, "Should never happened. Could not bear this error."); }
                 this.flushStackTraceAnalytics();
                 this._currentFailedRustcOutputTest = testItem;
             }
+
             this._currentFailedCaseOutputWithStackTrace.push(line);
         }
     }
@@ -154,12 +167,14 @@ class TestItemLocator {
     // We only allow one test case to be runned
     constructor(chosenRunnedTestItem: vscode.TestItem) {
         const node = getTestModelByTestItem(chosenRunnedTestItem);
+
         assert(node.kind === NodeKind.Test
             || node.kind === NodeKind.TestModule
             || node.kind === NodeKind.Target
             || node.kind === NodeKind.CargoPackage,
             "does not support workspace level, until we allow try to guess the target"
         );
+
         this._testModel = node;
     }
 
@@ -169,6 +184,7 @@ class TestItemLocator {
     findTestItemByRustcOutputCasePath(packageNormalizedName: string, targetRelativePath: string, path: string): vscode.TestItem | undefined {
         // const workspaceRootNode = getWorkspaceNodeOfTestModelNode(this._testModel);
         let targetNode = tryGetTargetNodeOfTestModelNode(this._testModel);
+
         if (!targetNode) {
             const packageNode = getPackageNodeOfTestModelNode(this._testModel);
 
@@ -183,10 +199,10 @@ class TestItemLocator {
 
             assert(targetCandidates.length === 1, "should find one and only one target node, but they might have same name and relative path, although it should be really rare");
             // REVIEW: What should we do if we found 2 or more candidates?
-            targetNode = targetCandidates[0];
+            targetNode = targetCandidates[0]!; // safe, we have checked the length
         }
 
-        const testNode = testModelTree.findTestLikeNodeUnderTarget(
+        const testNode = DummyRootNode.instance.findTestLikeNodeUnderTarget(
             targetNode,
             NodeKind.Test,
             path.split('::')

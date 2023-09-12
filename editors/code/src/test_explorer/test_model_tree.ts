@@ -7,6 +7,7 @@ import { fail } from "node:assert";
 
 export enum NodeKind {
     // VSCodeWorkSpace,
+    DummyRoot,
     CargoWorkspace,
     CargoPackage,
     Target,
@@ -61,17 +62,15 @@ interface Node {
     readonly kind: NodeKind;
 }
 
-export abstract class WorkspacesVisitor {
+export abstract class WorkspacesWalker {
     protected constructor() { }
 
-    protected visitCargoWorkspaceNodeCallback(_node: CargoWorkspaceNode): boolean | void { }
-    protected visitCargoPackageNodeCallback(_node: CargoPackageNode): boolean | void { }
-    protected visitTargetNodeCallback(_node: TargetNode): boolean | void { }
-    protected visitTestModuleNodeCallback(_node: TestModuleNode): boolean | void { }
-    protected visitTestNodeCallback(_node: TestNode): void { }
-
-    protected apply(node?: Nodes): void {
-        switch (node?.kind) {
+    protected apply(node: Nodes): void {
+        switch (node.kind) {
+            case NodeKind.DummyRoot:
+                DummyRootNode.instance.roots.forEach(workspaceNode =>
+                    this.visitCargoWorkspaceNode(workspaceNode));
+                break;
             case NodeKind.CargoWorkspace:
                 this.visitCargoWorkspaceNode(node);
                 break;
@@ -88,33 +87,27 @@ export abstract class WorkspacesVisitor {
                 this.visitTestNode(node);
                 break;
             default:
-                testModelTree.roots.forEach(workspaceNode =>
-                    this.visitCargoWorkspaceNode(workspaceNode));
-                break;
+                assertNever(node);
         }
     }
 
-    private visitCargoWorkspaceNode(cargoWorkspaceNode: CargoWorkspaceNode) {
-        if (this.visitCargoWorkspaceNodeCallback(cargoWorkspaceNode)) { return; };
+    protected visitCargoWorkspaceNode(cargoWorkspaceNode: CargoWorkspaceNode):void {
         cargoWorkspaceNode.members.forEach(packageNode =>
             this.visitCargoPackageNode(packageNode));
     }
 
-    private visitCargoPackageNode(cargoPackageNode: CargoPackageNode) {
-        if (this.visitCargoPackageNodeCallback(cargoPackageNode)) { return; };
+    protected visitCargoPackageNode(cargoPackageNode: CargoPackageNode):void {
         cargoPackageNode.targets.forEach(targetNode =>
             this.visitTargetNode(targetNode));
     }
 
-    private visitTargetNode(targetNode: TargetNode) {
-        if (this.visitTargetNodeCallback(targetNode)) { return; };
+    protected visitTargetNode(targetNode: TargetNode):void {
         if (targetNode.dummyTestModule) {
             this.visitTestModuleNode(targetNode.dummyTestModule);
         }
     }
 
-    private visitTestModuleNode(testModuleNode: TestModuleNode) {
-        if (this.visitTestModuleNodeCallback(testModuleNode)) { return; };
+    protected visitTestModuleNode(testModuleNode: TestModuleNode):void {
         testModuleNode.testChildren.forEach(it => {
             switch (it.kind) {
                 case NodeKind.TestModule:
@@ -129,15 +122,22 @@ export abstract class WorkspacesVisitor {
         });
     }
 
-    private visitTestNode(testNode: TestNode) {
-        this.visitTestNodeCallback(testNode);
+    protected visitTestNode(testNode: TestNode):void {
     }
 }
 
-// The vscode-test-items-tree is view
-// CargoWorkspaceNode is model
-// This is controller-like, but it does not have any IO
-class WorkspacesRoot {
+/**
+ * Dummy root node of the tree.
+ */
+export class DummyRootNode  implements Node {
+    static readonly instance = new DummyRootNode();
+
+    readonly parent: undefined;
+
+    readonly kind = NodeKind.DummyRoot;
+
+    private constructor() { }
+
     readonly roots: CargoWorkspaceNode[] = [];
 
     clear() {
@@ -214,39 +214,42 @@ class WorkspacesRoot {
      * until there is at least one item after removed.
      */
     removeTestItemsRecursivelyByUri(uri: vscode.Uri): void {
-        const nodes: TestLikeNode[] = UriMatcher.match(uri);
+        const nodes: TestLikeNode[] = UriMatcher.match(uri, DummyRootNode.instance);
         nodes.forEach(removeRecursively);
     }
 }
 
-class UriMatcher extends WorkspacesVisitor {
-    private static singlton = new UriMatcher();
+/**
+ * Find the the {@link TestModuleNode} in the given node by uri
+ */
+class UriMatcher extends WorkspacesWalker {
+    private constructor(private currentUri: vscode.Uri | undefined) {
+        super();
+    }
 
-    private currentUri: vscode.Uri | undefined;
-
-    public static match(uri: vscode.Uri) {
-        const { singlton } = UriMatcher;
-        singlton.result.clear();
-        singlton.currentUri = uri;
-        singlton.apply();
-        return Array.from(singlton.result);
+    public static match(uri: vscode.Uri, node: Nodes) {
+        const matcher = new UriMatcher(uri);
+        matcher.apply(node);
+        return Array.from(matcher.result);
     }
 
     private result: Set<TestModuleNode> = new Set();
 
-    protected override visitTestModuleNodeCallback(node: TestModuleNode): boolean {
+    protected override visitTestModuleNode(node: TestModuleNode) {
         assert(!!this.currentUri);
+
         if (node.definitionUri.toString() === this.currentUri.toString()) {
             this.result.add(node);
-            return true;
+            return;
         }
-        return false;
+
+        super.visitTestModuleNode(node);
     }
 }
 
 function removeRecursively(node: TestLikeNode) {
-    // delete the node from parent, until
-    // - after removing, the parent of node still has at least one node,
+    // delete the node from its parent, until
+    // - after removing, the parent still has at least one node,
     // - Or the parent of node is package node
     let curNode: RsNode | CargoPackageNode = node;
     while (true) {
@@ -285,10 +288,8 @@ function removeRecursively(node: TestLikeNode) {
     }
 }
 
-export const testModelTree = new WorkspacesRoot();
-
 export class CargoWorkspaceNode implements Node {
-    readonly parent: undefined;
+    readonly parent: DummyRootNode = DummyRootNode.instance;
     readonly kind = NodeKind.CargoWorkspace;
     readonly workspaceRoot: vscode.Uri;
     readonly manifestPath: vscode.Uri;
@@ -442,6 +443,7 @@ export class TestNode implements Node {
 }
 
 export type Nodes =
+    | DummyRootNode
     | CargoWorkspaceNode
     | CargoPackageNode
     | TargetNode
@@ -465,9 +467,12 @@ export function isTestLikeNode(node: Nodes): node is TestLikeNode {
 }
 
 export function getWorkspaceNodeOfTestModelNode(testModel: Nodes) {
+    assert(testModel.kind !== NodeKind.DummyRoot);
+
     while (testModel.kind !== NodeKind.CargoWorkspace) {
         testModel = testModel.parent;
     }
+
     return testModel;
 }
 
@@ -475,5 +480,6 @@ export function getPackageNodeOfTestModelNode(testModel: TestModuleNode | Target
     while (testModel.kind !== NodeKind.CargoPackage) {
         testModel = testModel.parent;
     }
+
     return testModel;
 }

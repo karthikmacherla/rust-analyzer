@@ -11,15 +11,15 @@ import {
     TargetNode,
     NodeKind,
     TestModuleNode,
-    testModelTree,
     isTestModuleNode,
-    WorkspacesVisitor,
+    WorkspacesWalker,
     TestNode,
     type Nodes,
     TargetKind,
     type TestLikeNode,
     isTestNode,
     isTestLikeNode,
+    DummyRootNode,
 } from "./test_model_tree";
 import { fail } from "assert";
 
@@ -133,7 +133,7 @@ async function refreshCore() {
     // Discard all
     // should we discard the old model tree here? should the user see the previous test items when refreshing?
     // testController.items.replace([]);
-    testModelTree.clear();
+    DummyRootNode.instance.clear();
 
     const cargoMetadataArray = await RaApiHelper.cargoWorkspaces();
 
@@ -143,7 +143,7 @@ async function refreshCore() {
     // But the tests in depdencies should be ignored.
     const noDepsWorkspaces = cargoMetadataArray.map(filterOutDepdencyPackages);
 
-    testModelTree.initByMedatada(noDepsWorkspaces);
+    DummyRootNode.instance.initByMedatada(noDepsWorkspaces);
 
     // After init, the target might not conatins any test(rather than not-fetched tests)
     // So we could not collect nodes which children need to be fetched, and fetch them
@@ -191,7 +191,7 @@ async function handleRustFileChange(uri: vscode.Uri) {
 }
 
 async function handleRustFileDelete(uri: vscode.Uri) {
-    testModelTree.removeTestItemsRecursivelyByUri(uri);
+    DummyRootNode.instance.removeTestItemsRecursivelyByUri(uri);
     updateTestItemsByModel();
 }
 
@@ -202,15 +202,21 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
         await discoverAllFilesInWorkspaces();
         return;
     }
+
     const idPath: string[] = [];
     let tmpItem = item;
     idPath.push(tmpItem.id);
+
     while (tmpItem.parent) {
         idPath.unshift(tmpItem.parent.id);
         tmpItem = tmpItem.parent;
     }
+
     const node = getTestModelByTestItem(item);
+
     switch (node.kind) {
+        case NodeKind.DummyRoot:
+            fail("Package data is got when getting workspace data, no need to be resolved lazily");
         case NodeKind.CargoWorkspace:
             fail("Package data is got when getting workspace data, no need to be resolved lazily");
         case NodeKind.CargoPackage:
@@ -243,7 +249,7 @@ async function getNormalizedTestRunnablesInFile(uri: vscode.Uri) {
 
     const runnables = rawRunables.map(it => new RunnableFacde(it));
 
-    // User might copy and past test, and then there might be same name test or test module
+    // User might copy and paste test, and then there might be same name test or test module
     // Although it's wrong, we need to tolerate it.
     // choose the first one.
     return uniqueRunnables(runnables);
@@ -266,7 +272,7 @@ async function updateModelOfUri(uri: vscode.Uri) {
     // Maybe from some to none
     // need to recursively clean the parent, until there is at least one test cases.
     if (runnables.length === 0) {
-        testModelTree.removeTestItemsRecursivelyByUri(uri);
+        DummyRootNode.instance.removeTestItemsRecursivelyByUri(uri);
         return;
     }
 
@@ -282,7 +288,7 @@ async function updateModelOfUri(uri: vscode.Uri) {
     // FIXME: should be file test modules, because of `path` attribute
     const fileTestModuleRunnbale = testModuelRunnables[0]!;
 
-    const nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+    const nearestNode = DummyRootNode.instance.findNearestNodeByRunnable(fileTestModuleRunnbale);
 
     assert(nearestNode.kind !== NodeKind.Test, "it's a test module");
     assert(nearestNode.kind !== NodeKind.CargoWorkspace, "We never partially delete delete workspace and package info, so at least it's a package");
@@ -305,14 +311,14 @@ async function updateModelOfUri(uri: vscode.Uri) {
 
     await ensureTestModuleParentExist(fileTestModuleRunnbale);
 
-    const parentModule = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+    const parentModule = DummyRootNode.instance.findNearestNodeByRunnable(fileTestModuleRunnbale);
 
     assert(isTestModuleNode(parentModule));
 
     await updateFileDefinitionTestModuleByRunnables(parentModule, runnables);
 
     async function ensureTestModuleParentExist(runnable: RunnableFacde) {
-        let nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+        let nearestNode = DummyRootNode.instance.findNearestNodeByRunnable(fileTestModuleRunnbale);
 
         assert(isTestLikeNode(nearestNode));
 
@@ -321,7 +327,7 @@ async function updateModelOfUri(uri: vscode.Uri) {
             assert(isTestModuleNode(nearestNode));
             await fetchAndUpdateChildrenForTestModuleNode(nearestNode);
 
-            nearestNode = testModelTree.findNearestNodeByRunnable(fileTestModuleRunnbale);
+            nearestNode = DummyRootNode.instance.findNearestNodeByRunnable(fileTestModuleRunnbale);
             assert(isTestLikeNode(nearestNode));
         }
     }
@@ -427,7 +433,7 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
         const deleted: Set<TestLikeNode> = new Set(childrenInTheSameFile);
 
         finalRunnables.forEach(it => {
-            const testNode = testModelTree.findNearestNodeByRunnable(it);
+            const testNode = DummyRootNode.instance.findNearestNodeByRunnable(it);
             assert(isTestLikeNode(testNode));
             if (isTestNodeAndRunnableMatched(testNode, it)) {
                 updated.push([testNode, it]);
@@ -481,7 +487,7 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
         // sort to ensure the parent is added before the chidren
         runnables.sort(RunnableFacde.sortByLabel)
             .forEach(runnable => {
-                const parentNode = testModelTree.findNearestNodeByRunnable(runnable);
+                const parentNode = DummyRootNode.instance.findNearestNodeByRunnable(runnable);
                 assert(parentNode.kind === NodeKind.TestModule, "Runable should be inserted into TestModule/Test, we create mock runnable for target/workspace node");
                 if (!parentNode.isDummyTestModule()) {
                     assert(parentNode.name === runnable.testPaths[runnable.testPaths.length - 2]);
@@ -513,31 +519,31 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
 }
 
 // Get all children of a test-like node
-class ChildrenCollector extends WorkspacesVisitor {
-    constructor(private rootNode: TestLikeNode) {
+class ChildrenCollector extends WorkspacesWalker {
+    private constructor(private rootNode: TestLikeNode) {
         super();
     }
 
-    public static collect(node: TestLikeNode, includeNodeItself = false) {
+    public static collect(node: TestLikeNode) {
         const it = new ChildrenCollector(node);
-        it.includeNodeItself = includeNodeItself;
-        it.result.clear();
         it.apply(node);
         return Array.from(it.result);
     }
 
-    private includeNodeItself: boolean = false;
-
     private result: Set<TestLikeNode> = new Set();
 
-    protected override visitTestModuleNodeCallback(node: TestModuleNode): void {
-        if (!(node === this.rootNode && !this.includeNodeItself)) {
+    protected override visitTestModuleNode(node: TestModuleNode): void {
+        if (!(node === this.rootNode)) {
             this.result.add(node);
         }
+
+        super.visitTestModuleNode(node);
     }
 
-    protected override visitTestNodeCallback(node: TestNode): void {
+    protected override visitTestNode(node: TestNode): void {
         this.result.add(node);
+
+        super.visitTestNode(node);
     }
 }
 
@@ -560,6 +566,8 @@ export function getTestModelByTestItem(testItem: vscode.TestItem): Nodes {
 function getRunnableByTestModel(testModel: Nodes): RunnableFacde {
     let testLikeNode: TestLikeNode | undefined;
     switch (testModel.kind) {
+        case NodeKind.DummyRoot:
+            fail("Never");
         case NodeKind.CargoWorkspace:
             fail("Do not support for now");
         case NodeKind.CargoPackage:
@@ -618,12 +626,12 @@ export function getRunnableByTestItem(testItem: vscode.TestItem): RunnableFacde 
 
 // Build vscode.TestItem tree
 // and bind TestModel and vscode.TestItem
-class VscodeTestTreeBuilder extends WorkspacesVisitor {
+class VscodeTestTreeBuilder extends WorkspacesWalker {
     private static singlton = new VscodeTestTreeBuilder();
 
     public static buildChildrenFor(node: TestModuleNode) {
         const { singlton } = VscodeTestTreeBuilder;
-        // not traversal for the node itself
+        // not traversal the node itself
         node.testChildren.forEach(child => {
             singlton.apply(child);
         });
@@ -634,7 +642,7 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         testItemByTestLike.clear();
         singlton.rootsTestItems = [];
         singlton.testItemByNode.clear();
-        singlton.apply();
+        singlton.apply(DummyRootNode.instance);
         const result = singlton.rootsTestItems;
         return result;
     }
@@ -648,9 +656,11 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         if (isTestModuleNode(node) || isTestNode(node)) {
             testItemByTestLike.set(node, testItem);
         }
+
         this.testItemByNode.set(node, testItem);
 
         const parentTestItem = tryGetParentTestItem.call(this, node);
+
         if (parentTestItem) {
             parentTestItem.children.add(testItem);
         } else {
@@ -680,39 +690,45 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         return node.targets.size === 0;
     }
 
-    protected override visitCargoWorkspaceNodeCallback(node: CargoWorkspaceNode) {
+    protected override visitCargoWorkspaceNode(node: CargoWorkspaceNode) {
         // if there is only one workspace, do not create a test item node for it
         // Flatten the items
-        if (testModelTree.roots.length === 1) {
-            return false;
+        if (DummyRootNode.instance.roots.length === 1) {
+            return super.visitCargoWorkspaceNode(node);
         }
+
         // if there is no tests in workspace, not create test-item.
         // and not traversal subtree
         if (this.isWorkspaceEmptyWithTests(node)) {
-            return true;
+            return;
         }
+
         const testItem = testController!.createTestItem(node.workspaceRoot.toString(), `$(project)${node.workspaceRoot.fsPath}`, node.manifestPath);
         this.addTestItemToParentOrRoot(node, testItem);
-        return false;
+
+        super.visitCargoWorkspaceNode(node);
     }
 
-    protected override visitCargoPackageNodeCallback(node: CargoPackageNode) {
+    protected override visitCargoPackageNode(node: CargoPackageNode) {
         // if there is only one package, do not create a test item node for it
         // Flatten the items
         if (node.parent.members.length === 1) {
-            return false;
+            return super.visitCargoPackageNode(node);
         }
+
         // if there is no tests in workspace, not create test-item.
         // and not traversal subtree
         if (this.isPackageEmptyWithTests(node)) {
-            return true;
+            return;
         }
+
         const testItem = testController!.createTestItem(node.manifestPath.fsPath, `$(package)${node.name}`, node.manifestPath);
         this.addTestItemToParentOrRoot(node, testItem);
-        return false;
+
+        super.visitCargoPackageNode(node);
     }
 
-    protected override visitTargetNodeCallback(node: TargetNode) {
+    protected override visitTargetNode(node: TargetNode) {
         // if there is only one target, do not create a test item node for it
         // Flatten the items
         if (node.parent.targets.size === 1) {
@@ -736,13 +752,16 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
 
         const testItem = testController!.createTestItem(`${icon}${node.name}`, `${icon}${node.name}`, node.srcPath);
         this.addTestItemToParentOrRoot(node, testItem);
+
+        super.visitTargetNode(node);
     }
 
-    protected override visitTestModuleNodeCallback(node: TestModuleNode) {
+    protected override visitTestModuleNode(node: TestModuleNode) {
         if (node.isDummyTestModule()) {
             // not create test item for root test module, which is representated by corresponding target node.
             return;
         }
+
         const testItem = testController!.createTestItem(node.name, `$(symbol-module)${node.name}`, node.declarationInfo.uri);
         testItem.range = node.declarationInfo.range;
         const isChildrenFetched = node.testChildren.size !== 0;
@@ -751,19 +770,27 @@ class VscodeTestTreeBuilder extends WorkspacesVisitor {
         if (!isChildrenFetched && isDeclarationModule) {
             testItem.canResolveChildren = true;
         }
+
         this.addTestItemToParentOrRoot(node, testItem);
+
+        super.visitTestModuleNode(node);
     }
 
-    protected override visitTestNodeCallback(node: TestNode) {
+    protected override visitTestNode(node: TestNode) {
         const testItem = testController!.createTestItem(node.name, `$(symbol-method)${node.name}`, node.location.uri);
         testItem.range = node.location.range;
         this.addTestItemToParentOrRoot(node, testItem);
+
+        super.visitTestNode(node);
     }
 }
 
 async function getModuleDefinitionLocation(runnable: RunnableFacde) {
     assert(runnable.isTestModuleDeclarationRunnable);
+
     const definitionLocations = await RaApiHelper.moduleDefinition(runnable.origin.location!);
+
     assert(definitionLocations?.length === 1, "There should always be one and only one module definition for any module declaration.");
+
     return definitionLocations[0]!; // safe, for we have checked the length
 }

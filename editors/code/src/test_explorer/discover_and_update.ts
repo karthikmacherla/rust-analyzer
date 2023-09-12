@@ -139,8 +139,8 @@ async function refreshCore() {
 
     if (!cargoMetadataArray) return;
 
-    // The workspaces got from RA contains depdencies(.i.e, RA does not add "--no-deps" when running `cargo metadata`)
-    // But the tests in depdencies should be ignored.
+    // The workspaces got from RA contains depdency packages(.i.e, RA does not add "--no-deps" when running `cargo metadata`)
+    // But they are not needed in test explorer
     const noDepsWorkspaces = cargoMetadataArray.map(filterOutDepdencyPackages);
 
     DummyRootNode.instance.initByMedatada(noDepsWorkspaces);
@@ -157,7 +157,7 @@ async function refreshCore() {
     );
 
     for (const uri of allTargetUris) {
-        await updateModelOfUri(uri);
+        await loadFileAndUpdateModel(uri);
     }
 
     // update all test info in current file, and trigger build of test item tree
@@ -176,13 +176,12 @@ async function refreshCore() {
 async function handleRustFileCreate(uri: vscode.Uri) {
     // Maybe we need to a "smart" strategy, when too much files changes in short time,
     // we change to rebuild all.
-
-    await updateModelOfUri(uri);
+    await loadFileAndUpdateModel(uri);
     updateTestItemsByModel();
 }
 
 async function handleFileChangeCore(uri: vscode.Uri) {
-    await updateModelOfUri(uri);
+    await loadFileAndUpdateModel(uri);
     updateTestItemsByModel();
 }
 
@@ -266,7 +265,7 @@ async function getNormalizedTestRunnablesInFile(uri: vscode.Uri) {
     }
 }
 
-async function updateModelOfUri(uri: vscode.Uri) {
+async function loadFileAndUpdateModel(uri: vscode.Uri) {
     const runnables = await getNormalizedTestRunnablesInFile(uri);
 
     // Maybe from some to none
@@ -291,7 +290,7 @@ async function updateModelOfUri(uri: vscode.Uri) {
     const nearestNode = DummyRootNode.instance.findNearestNodeByRunnable(fileTestModuleRunnbale);
 
     assert(nearestNode.kind !== NodeKind.Test, "it's a test module");
-    assert(nearestNode.kind !== NodeKind.CargoWorkspace, "We never partially delete delete workspace and package info, so at least it's a package");
+    assert(nearestNode.kind !== NodeKind.CargoWorkspace, "We never delete workspace and package info unless refresh, so at least it's a package");
 
     // create target node when creating the first test for some target.
     // This is necessary, because we do not know how many targets a package contains unless we fetch data of `cargo metadata`
@@ -640,19 +639,20 @@ class VscodeTestTreeBuilder extends WorkspacesWalker {
     public static build() {
         const { singlton } = VscodeTestTreeBuilder;
         testItemByTestLike.clear();
-        singlton.rootsTestItems = [];
+        singlton.rootTestItems = [];
         singlton.testItemByNode.clear();
         singlton.apply(DummyRootNode.instance);
-        const result = singlton.rootsTestItems;
+        const result = singlton.rootTestItems;
         return result;
     }
 
-    private rootsTestItems: vscode.TestItem[] = [];
+    private rootTestItems: vscode.TestItem[] = [];
 
     private testItemByNode = new Map<Nodes, vscode.TestItem>();
 
     private addTestItemToParentOrRoot(node: Nodes, testItem: vscode.TestItem) {
         testModelByTestItem.set(testItem, node);
+
         if (isTestModuleNode(node) || isTestNode(node)) {
             testItemByTestLike.set(node, testItem);
         }
@@ -664,7 +664,7 @@ class VscodeTestTreeBuilder extends WorkspacesWalker {
         if (parentTestItem) {
             parentTestItem.children.add(testItem);
         } else {
-            this.rootsTestItems.push(testItem);
+            this.rootTestItems.push(testItem);
         }
 
         function tryGetParentTestItem(this: VscodeTestTreeBuilder, node: Nodes) {
@@ -732,7 +732,7 @@ class VscodeTestTreeBuilder extends WorkspacesWalker {
         // if there is only one target, do not create a test item node for it
         // Flatten the items
         if (node.parent.targets.size === 1) {
-            return;
+            return super.visitTargetNode(node);
         }
 
         let icon: string;
@@ -759,7 +759,7 @@ class VscodeTestTreeBuilder extends WorkspacesWalker {
     protected override visitTestModuleNode(node: TestModuleNode) {
         if (node.isDummyTestModule()) {
             // not create test item for root test module, which is representated by corresponding target node.
-            return;
+            return super.visitTestModuleNode(node);
         }
 
         const testItem = testController!.createTestItem(node.name, `$(symbol-module)${node.name}`, node.declarationInfo.uri);

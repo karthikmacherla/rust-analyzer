@@ -198,6 +198,20 @@ impl ast::HasModuleItem for MacroItems {}
 impl MacroItems {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MacroEagerInput {
+    pub(crate) syntax: SyntaxNode,
+}
+impl MacroEagerInput {
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['(']) }
+    pub fn exprs(&self) -> AstChildren<Expr> { support::children(&self.syntax) }
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![')']) }
+    pub fn l_curly_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['{']) }
+    pub fn r_curly_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['}']) }
+    pub fn l_brack_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['[']) }
+    pub fn r_brack_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![']']) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MacroStmts {
     pub(crate) syntax: SyntaxNode,
 }
@@ -695,7 +709,7 @@ impl ConstParam {
     pub fn colon_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![:]) }
     pub fn ty(&self) -> Option<Type> { support::child(&self.syntax) }
     pub fn eq_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![=]) }
-    pub fn default_val(&self) -> Option<Expr> { support::child(&self.syntax) }
+    pub fn default_val(&self) -> Option<ConstArg> { support::child(&self.syntax) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -791,6 +805,20 @@ impl ArrayExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AsmExpr {
+    pub(crate) syntax: SyntaxNode,
+}
+impl ast::HasAttrs for AsmExpr {}
+impl AsmExpr {
+    pub fn builtin_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![builtin]) }
+    pub fn pound_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![#]) }
+    pub fn asm_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![asm]) }
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['(']) }
+    pub fn expr(&self) -> Option<Expr> { support::child(&self.syntax) }
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![')']) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AwaitExpr {
     pub(crate) syntax: SyntaxNode,
 }
@@ -807,16 +835,6 @@ pub struct BinExpr {
 }
 impl ast::HasAttrs for BinExpr {}
 impl BinExpr {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BoxExpr {
-    pub(crate) syntax: SyntaxNode,
-}
-impl ast::HasAttrs for BoxExpr {}
-impl BoxExpr {
-    pub fn box_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![box]) }
-    pub fn expr(&self) -> Option<Expr> { support::child(&self.syntax) }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BreakExpr {
@@ -902,6 +920,24 @@ impl ForExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FormatArgsExpr {
+    pub(crate) syntax: SyntaxNode,
+}
+impl ast::HasAttrs for FormatArgsExpr {}
+impl FormatArgsExpr {
+    pub fn builtin_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![builtin]) }
+    pub fn pound_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![#]) }
+    pub fn format_args_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, T![format_args])
+    }
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['(']) }
+    pub fn template(&self) -> Option<Expr> { support::child(&self.syntax) }
+    pub fn comma_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![,]) }
+    pub fn args(&self) -> AstChildren<FormatArgsArg> { support::children(&self.syntax) }
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![')']) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IfExpr {
     pub(crate) syntax: SyntaxNode,
 }
@@ -968,6 +1004,24 @@ impl MethodCallExpr {
     pub fn dot_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![.]) }
     pub fn name_ref(&self) -> Option<NameRef> { support::child(&self.syntax) }
     pub fn generic_arg_list(&self) -> Option<GenericArgList> { support::child(&self.syntax) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OffsetOfExpr {
+    pub(crate) syntax: SyntaxNode,
+}
+impl ast::HasAttrs for OffsetOfExpr {}
+impl OffsetOfExpr {
+    pub fn builtin_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![builtin]) }
+    pub fn pound_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![#]) }
+    pub fn offset_of_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, T![offset_of])
+    }
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T!['(']) }
+    pub fn ty(&self) -> Option<Type> { support::child(&self.syntax) }
+    pub fn comma_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![,]) }
+    pub fn fields(&self) -> AstChildren<NameRef> { support::children(&self.syntax) }
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![')']) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1110,6 +1164,16 @@ pub struct UnderscoreExpr {
 impl ast::HasAttrs for UnderscoreExpr {}
 impl UnderscoreExpr {
     pub fn underscore_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![_]) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FormatArgsArg {
+    pub(crate) syntax: SyntaxNode,
+}
+impl ast::HasName for FormatArgsArg {}
+impl FormatArgsArg {
+    pub fn eq_token(&self) -> Option<SyntaxToken> { support::token(&self.syntax, T![=]) }
+    pub fn expr(&self) -> Option<Expr> { support::child(&self.syntax) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1541,10 +1605,10 @@ pub enum Type {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     ArrayExpr(ArrayExpr),
+    AsmExpr(AsmExpr),
     AwaitExpr(AwaitExpr),
     BinExpr(BinExpr),
     BlockExpr(BlockExpr),
-    BoxExpr(BoxExpr),
     BreakExpr(BreakExpr),
     CallExpr(CallExpr),
     CastExpr(CastExpr),
@@ -1552,6 +1616,7 @@ pub enum Expr {
     ContinueExpr(ContinueExpr),
     FieldExpr(FieldExpr),
     ForExpr(ForExpr),
+    FormatArgsExpr(FormatArgsExpr),
     IfExpr(IfExpr),
     IndexExpr(IndexExpr),
     Literal(Literal),
@@ -1559,6 +1624,7 @@ pub enum Expr {
     MacroExpr(MacroExpr),
     MatchExpr(MatchExpr),
     MethodCallExpr(MethodCallExpr),
+    OffsetOfExpr(OffsetOfExpr),
     ParenExpr(ParenExpr),
     PathExpr(PathExpr),
     PrefixExpr(PrefixExpr),
@@ -1913,6 +1979,17 @@ impl AstNode for TokenTree {
 }
 impl AstNode for MacroItems {
     fn can_cast(kind: SyntaxKind) -> bool { kind == MACRO_ITEMS }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+impl AstNode for MacroEagerInput {
+    fn can_cast(kind: SyntaxKind) -> bool { kind == MACRO_EAGER_INPUT }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {
             Some(Self { syntax })
@@ -2428,6 +2505,17 @@ impl AstNode for ArrayExpr {
     }
     fn syntax(&self) -> &SyntaxNode { &self.syntax }
 }
+impl AstNode for AsmExpr {
+    fn can_cast(kind: SyntaxKind) -> bool { kind == ASM_EXPR }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
 impl AstNode for AwaitExpr {
     fn can_cast(kind: SyntaxKind) -> bool { kind == AWAIT_EXPR }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
@@ -2441,17 +2529,6 @@ impl AstNode for AwaitExpr {
 }
 impl AstNode for BinExpr {
     fn can_cast(kind: SyntaxKind) -> bool { kind == BIN_EXPR }
-    fn cast(syntax: SyntaxNode) -> Option<Self> {
-        if Self::can_cast(syntax.kind()) {
-            Some(Self { syntax })
-        } else {
-            None
-        }
-    }
-    fn syntax(&self) -> &SyntaxNode { &self.syntax }
-}
-impl AstNode for BoxExpr {
-    fn can_cast(kind: SyntaxKind) -> bool { kind == BOX_EXPR }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {
             Some(Self { syntax })
@@ -2538,6 +2615,17 @@ impl AstNode for ForExpr {
     }
     fn syntax(&self) -> &SyntaxNode { &self.syntax }
 }
+impl AstNode for FormatArgsExpr {
+    fn can_cast(kind: SyntaxKind) -> bool { kind == FORMAT_ARGS_EXPR }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
 impl AstNode for IfExpr {
     fn can_cast(kind: SyntaxKind) -> bool { kind == IF_EXPR }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
@@ -2606,6 +2694,17 @@ impl AstNode for MatchExpr {
 }
 impl AstNode for MethodCallExpr {
     fn can_cast(kind: SyntaxKind) -> bool { kind == METHOD_CALL_EXPR }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+impl AstNode for OffsetOfExpr {
+    fn can_cast(kind: SyntaxKind) -> bool { kind == OFFSET_OF_EXPR }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {
             Some(Self { syntax })
@@ -2760,6 +2859,17 @@ impl AstNode for LetExpr {
 }
 impl AstNode for UnderscoreExpr {
     fn can_cast(kind: SyntaxKind) -> bool { kind == UNDERSCORE_EXPR }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+impl AstNode for FormatArgsArg {
+    fn can_cast(kind: SyntaxKind) -> bool { kind == FORMAT_ARGS_ARG }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {
             Some(Self { syntax })
@@ -3348,6 +3458,9 @@ impl AstNode for Type {
 impl From<ArrayExpr> for Expr {
     fn from(node: ArrayExpr) -> Expr { Expr::ArrayExpr(node) }
 }
+impl From<AsmExpr> for Expr {
+    fn from(node: AsmExpr) -> Expr { Expr::AsmExpr(node) }
+}
 impl From<AwaitExpr> for Expr {
     fn from(node: AwaitExpr) -> Expr { Expr::AwaitExpr(node) }
 }
@@ -3356,9 +3469,6 @@ impl From<BinExpr> for Expr {
 }
 impl From<BlockExpr> for Expr {
     fn from(node: BlockExpr) -> Expr { Expr::BlockExpr(node) }
-}
-impl From<BoxExpr> for Expr {
-    fn from(node: BoxExpr) -> Expr { Expr::BoxExpr(node) }
 }
 impl From<BreakExpr> for Expr {
     fn from(node: BreakExpr) -> Expr { Expr::BreakExpr(node) }
@@ -3381,6 +3491,9 @@ impl From<FieldExpr> for Expr {
 impl From<ForExpr> for Expr {
     fn from(node: ForExpr) -> Expr { Expr::ForExpr(node) }
 }
+impl From<FormatArgsExpr> for Expr {
+    fn from(node: FormatArgsExpr) -> Expr { Expr::FormatArgsExpr(node) }
+}
 impl From<IfExpr> for Expr {
     fn from(node: IfExpr) -> Expr { Expr::IfExpr(node) }
 }
@@ -3401,6 +3514,9 @@ impl From<MatchExpr> for Expr {
 }
 impl From<MethodCallExpr> for Expr {
     fn from(node: MethodCallExpr) -> Expr { Expr::MethodCallExpr(node) }
+}
+impl From<OffsetOfExpr> for Expr {
+    fn from(node: OffsetOfExpr) -> Expr { Expr::OffsetOfExpr(node) }
 }
 impl From<ParenExpr> for Expr {
     fn from(node: ParenExpr) -> Expr { Expr::ParenExpr(node) }
@@ -3449,10 +3565,10 @@ impl AstNode for Expr {
         matches!(
             kind,
             ARRAY_EXPR
+                | ASM_EXPR
                 | AWAIT_EXPR
                 | BIN_EXPR
                 | BLOCK_EXPR
-                | BOX_EXPR
                 | BREAK_EXPR
                 | CALL_EXPR
                 | CAST_EXPR
@@ -3460,6 +3576,7 @@ impl AstNode for Expr {
                 | CONTINUE_EXPR
                 | FIELD_EXPR
                 | FOR_EXPR
+                | FORMAT_ARGS_EXPR
                 | IF_EXPR
                 | INDEX_EXPR
                 | LITERAL
@@ -3467,6 +3584,7 @@ impl AstNode for Expr {
                 | MACRO_EXPR
                 | MATCH_EXPR
                 | METHOD_CALL_EXPR
+                | OFFSET_OF_EXPR
                 | PAREN_EXPR
                 | PATH_EXPR
                 | PREFIX_EXPR
@@ -3486,10 +3604,10 @@ impl AstNode for Expr {
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
             ARRAY_EXPR => Expr::ArrayExpr(ArrayExpr { syntax }),
+            ASM_EXPR => Expr::AsmExpr(AsmExpr { syntax }),
             AWAIT_EXPR => Expr::AwaitExpr(AwaitExpr { syntax }),
             BIN_EXPR => Expr::BinExpr(BinExpr { syntax }),
             BLOCK_EXPR => Expr::BlockExpr(BlockExpr { syntax }),
-            BOX_EXPR => Expr::BoxExpr(BoxExpr { syntax }),
             BREAK_EXPR => Expr::BreakExpr(BreakExpr { syntax }),
             CALL_EXPR => Expr::CallExpr(CallExpr { syntax }),
             CAST_EXPR => Expr::CastExpr(CastExpr { syntax }),
@@ -3497,6 +3615,7 @@ impl AstNode for Expr {
             CONTINUE_EXPR => Expr::ContinueExpr(ContinueExpr { syntax }),
             FIELD_EXPR => Expr::FieldExpr(FieldExpr { syntax }),
             FOR_EXPR => Expr::ForExpr(ForExpr { syntax }),
+            FORMAT_ARGS_EXPR => Expr::FormatArgsExpr(FormatArgsExpr { syntax }),
             IF_EXPR => Expr::IfExpr(IfExpr { syntax }),
             INDEX_EXPR => Expr::IndexExpr(IndexExpr { syntax }),
             LITERAL => Expr::Literal(Literal { syntax }),
@@ -3504,6 +3623,7 @@ impl AstNode for Expr {
             MACRO_EXPR => Expr::MacroExpr(MacroExpr { syntax }),
             MATCH_EXPR => Expr::MatchExpr(MatchExpr { syntax }),
             METHOD_CALL_EXPR => Expr::MethodCallExpr(MethodCallExpr { syntax }),
+            OFFSET_OF_EXPR => Expr::OffsetOfExpr(OffsetOfExpr { syntax }),
             PAREN_EXPR => Expr::ParenExpr(ParenExpr { syntax }),
             PATH_EXPR => Expr::PathExpr(PathExpr { syntax }),
             PREFIX_EXPR => Expr::PrefixExpr(PrefixExpr { syntax }),
@@ -3525,10 +3645,10 @@ impl AstNode for Expr {
     fn syntax(&self) -> &SyntaxNode {
         match self {
             Expr::ArrayExpr(it) => &it.syntax,
+            Expr::AsmExpr(it) => &it.syntax,
             Expr::AwaitExpr(it) => &it.syntax,
             Expr::BinExpr(it) => &it.syntax,
             Expr::BlockExpr(it) => &it.syntax,
-            Expr::BoxExpr(it) => &it.syntax,
             Expr::BreakExpr(it) => &it.syntax,
             Expr::CallExpr(it) => &it.syntax,
             Expr::CastExpr(it) => &it.syntax,
@@ -3536,6 +3656,7 @@ impl AstNode for Expr {
             Expr::ContinueExpr(it) => &it.syntax,
             Expr::FieldExpr(it) => &it.syntax,
             Expr::ForExpr(it) => &it.syntax,
+            Expr::FormatArgsExpr(it) => &it.syntax,
             Expr::IfExpr(it) => &it.syntax,
             Expr::IndexExpr(it) => &it.syntax,
             Expr::Literal(it) => &it.syntax,
@@ -3543,6 +3664,7 @@ impl AstNode for Expr {
             Expr::MacroExpr(it) => &it.syntax,
             Expr::MatchExpr(it) => &it.syntax,
             Expr::MethodCallExpr(it) => &it.syntax,
+            Expr::OffsetOfExpr(it) => &it.syntax,
             Expr::ParenExpr(it) => &it.syntax,
             Expr::PathExpr(it) => &it.syntax,
             Expr::PrefixExpr(it) => &it.syntax,
@@ -4003,9 +4125,9 @@ impl AstNode for AnyHasAttrs {
                 | TYPE_PARAM
                 | LET_STMT
                 | ARRAY_EXPR
+                | ASM_EXPR
                 | AWAIT_EXPR
                 | BIN_EXPR
-                | BOX_EXPR
                 | BREAK_EXPR
                 | CALL_EXPR
                 | CAST_EXPR
@@ -4013,12 +4135,14 @@ impl AstNode for AnyHasAttrs {
                 | CONTINUE_EXPR
                 | FIELD_EXPR
                 | FOR_EXPR
+                | FORMAT_ARGS_EXPR
                 | IF_EXPR
                 | INDEX_EXPR
                 | LITERAL
                 | LOOP_EXPR
                 | MATCH_EXPR
                 | METHOD_CALL_EXPR
+                | OFFSET_OF_EXPR
                 | PAREN_EXPR
                 | PATH_EXPR
                 | PREFIX_EXPR
@@ -4154,6 +4278,7 @@ impl AstNode for AnyHasName {
                 | VARIANT
                 | CONST_PARAM
                 | TYPE_PARAM
+                | FORMAT_ARGS_ARG
                 | IDENT_PAT
         )
     }
@@ -4356,6 +4481,11 @@ impl std::fmt::Display for TokenTree {
     }
 }
 impl std::fmt::Display for MacroItems {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.syntax(), f)
+    }
+}
+impl std::fmt::Display for MacroEagerInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
     }
@@ -4590,17 +4720,17 @@ impl std::fmt::Display for ArrayExpr {
         std::fmt::Display::fmt(self.syntax(), f)
     }
 }
+impl std::fmt::Display for AsmExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.syntax(), f)
+    }
+}
 impl std::fmt::Display for AwaitExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
     }
 }
 impl std::fmt::Display for BinExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self.syntax(), f)
-    }
-}
-impl std::fmt::Display for BoxExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
     }
@@ -4640,6 +4770,11 @@ impl std::fmt::Display for ForExpr {
         std::fmt::Display::fmt(self.syntax(), f)
     }
 }
+impl std::fmt::Display for FormatArgsExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.syntax(), f)
+    }
+}
 impl std::fmt::Display for IfExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
@@ -4671,6 +4806,11 @@ impl std::fmt::Display for MatchExpr {
     }
 }
 impl std::fmt::Display for MethodCallExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.syntax(), f)
+    }
+}
+impl std::fmt::Display for OffsetOfExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
     }
@@ -4741,6 +4881,11 @@ impl std::fmt::Display for LetExpr {
     }
 }
 impl std::fmt::Display for UnderscoreExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.syntax(), f)
+    }
+}
+impl std::fmt::Display for FormatArgsArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self.syntax(), f)
     }

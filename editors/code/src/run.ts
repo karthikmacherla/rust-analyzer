@@ -5,7 +5,7 @@ import * as tasks from "./tasks";
 
 import type { CtxInit } from "./ctx";
 import { makeDebugConfig } from "./debug";
-import type { Config, RunnableEnvCfg } from "./config";
+import type { Config, RunnableEnvCfg, RunnableEnvCfgItem } from "./config";
 import { unwrapUndefinable } from "./undefinable";
 
 const quickPickButtons = [
@@ -16,7 +16,7 @@ export async function selectRunnable(
     ctx: CtxInit,
     prevRunnable?: RunnableQuickPick,
     debuggeeOnly = false,
-    showButtons: boolean = true
+    showButtons: boolean = true,
 ): Promise<RunnableQuickPick | undefined> {
     const editor = ctx.activeRustEditor;
     if (!editor) return;
@@ -84,7 +84,7 @@ export async function selectRunnable(
                     }
                 }
             }),
-            quickPick
+            quickPick,
         );
         quickPick.show();
     });
@@ -103,7 +103,7 @@ export class RunnableQuickPick implements vscode.QuickPickItem {
 
 export function prepareEnv(
     runnable: ra.Runnable,
-    runnableEnvCfg: RunnableEnvCfg
+    runnableEnvCfg: RunnableEnvCfg,
 ): Record<string, string> {
     const env: Record<string, string> = { RUST_BACKTRACE: "short" };
 
@@ -112,11 +112,21 @@ export function prepareEnv(
     }
 
     Object.assign(env, process.env as { [key: string]: string });
+    const platform = process.platform;
+
+    const checkPlatform = (it: RunnableEnvCfgItem) => {
+        if (it.platform) {
+            const platforms = Array.isArray(it.platform) ? it.platform : [it.platform];
+            return platforms.indexOf(platform) >= 0;
+        }
+        return true;
+    };
 
     if (runnableEnvCfg) {
         if (Array.isArray(runnableEnvCfg)) {
             for (const it of runnableEnvCfg) {
-                if (!it.mask || new RegExp(it.mask).test(runnable.label)) {
+                const masked = !it.mask || new RegExp(it.mask).test(runnable.label);
+                if (masked && checkPlatform(it)) {
                     Object.assign(env, it.env);
                 }
             }
@@ -156,7 +166,7 @@ export async function createTask(runnable: ra.Runnable, config: Config): Promise
         args,
         config.problemMatcher,
         config.cargoRunner,
-        true
+        true,
     );
 
     cargoTask.presentationOptions.clear = true;

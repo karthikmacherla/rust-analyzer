@@ -71,19 +71,37 @@ impl Definition {
         sema: &Semantics<'_, RootDatabase>,
         new_name: &str,
     ) -> Result<SourceChange> {
+        // self.krate() returns None if
+        // self is a built-in attr, built-in type or tool module.
+        // it is not allowed for these defs to be renamed.
+        // cases where self.krate() is None is handled below.
+        if let Some(krate) = self.krate(sema.db) {
+            if !krate.origin(sema.db).is_local() {
+                bail!("Cannot rename a non-local definition.")
+            }
+        }
+
         match *self {
             Definition::Module(module) => rename_mod(sema, module, new_name),
+            Definition::ToolModule(_) => {
+                bail!("Cannot rename a tool module")
+            }
             Definition::BuiltinType(_) => {
                 bail!("Cannot rename builtin type")
             }
+            Definition::BuiltinAttr(_) => {
+                bail!("Cannot rename a builtin attr.")
+            }
             Definition::SelfType(_) => bail!("Cannot rename `Self`"),
+            Definition::Macro(mac) => rename_reference(sema, Definition::Macro(mac), new_name),
             def => rename_reference(sema, def, new_name),
         }
     }
 
     /// Textual range of the identifier which will change when renaming this
-    /// `Definition`. Note that some definitions, like builtin types, can't be
-    /// renamed.
+    /// `Definition`. Note that builtin types can't be
+    /// renamed and extern crate names will report its range, though a rename will introduce
+    /// an alias instead.
     pub fn range_for_rename(self, sema: &Semantics<'_, RootDatabase>) -> Option<FileRange> {
         let res = match self {
             Definition::Macro(mac) => {
@@ -145,6 +163,16 @@ impl Definition {
                 let src = label.source(sema.db);
                 let lifetime = src.value.lifetime()?;
                 src.with_value(lifetime.syntax()).original_file_range_opt(sema.db)
+            }
+            Definition::ExternCrateDecl(it) => {
+                let src = it.source(sema.db)?;
+                if let Some(rename) = src.value.rename() {
+                    let name = rename.name()?;
+                    src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                } else {
+                    let name = src.value.name_ref()?;
+                    src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                }
             }
             Definition::BuiltinType(_) => return None,
             Definition::SelfType(_) => return None,
@@ -526,6 +554,9 @@ fn source_edit_from_def(
             TextRange::new(range.start() + syntax::TextSize::from(1), range.end()),
             new_name.strip_prefix('\'').unwrap_or(new_name).to_owned(),
         ),
+        Definition::ExternCrateDecl(decl) if decl.alias(sema.db).is_none() => {
+            (TextRange::empty(range.end()), format!(" as {new_name}"))
+        }
         _ => (range, new_name.to_owned()),
     };
     edit.replace(range, new_name);

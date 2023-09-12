@@ -35,6 +35,8 @@ impl InferenceContext<'_> {
     fn infer_mut_expr_without_adjust(&mut self, tgt_expr: ExprId, mutability: Mutability) {
         match &self.body[tgt_expr] {
             Expr::Missing => (),
+            Expr::InlineAsm(e) => self.infer_mut_expr_without_adjust(e.e, Mutability::Not),
+            Expr::OffsetOf(_) => (),
             &Expr::If { condition, then_branch, else_branch } => {
                 self.infer_mut_expr(condition, Mutability::Not);
                 self.infer_mut_expr(then_branch, Mutability::Not);
@@ -68,10 +70,6 @@ impl InferenceContext<'_> {
                 if let Some(tail) = tail {
                     self.infer_mut_expr(*tail, Mutability::Not);
                 }
-            }
-            &Expr::While { condition: c, body, label: _ } => {
-                self.infer_mut_expr(c, Mutability::Not);
-                self.infer_mut_expr(body, Mutability::Not);
             }
             Expr::MethodCall { receiver: it, method_name: _, args, generic_args: _ }
             | Expr::Call { callee: it, args, is_assignee_expr: _ } => {

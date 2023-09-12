@@ -26,7 +26,7 @@ pub trait WithFixture: Default + SourceDatabaseExt + 'static {
         let fixture = ChangeFixture::parse(ra_fixture);
         let mut db = Self::default();
         fixture.change.apply(&mut db);
-        assert_eq!(fixture.files.len(), 1);
+        assert_eq!(fixture.files.len(), 1, "Multiple file found in the fixture");
         (db, fixture.files[0])
     }
 
@@ -130,6 +130,7 @@ impl ChangeFixture {
         let mut default_crate_root: Option<FileId> = None;
         let mut default_target_data_layout: Option<String> = None;
         let mut default_cfg = CfgOptions::default();
+        let mut default_env = Env::new_for_test_fixture();
 
         let mut file_set = FileSet::default();
         let mut current_source_root_kind = SourceRootKind::Local;
@@ -178,8 +179,8 @@ impl ChangeFixture {
                     meta.edition,
                     Some(crate_name.clone().into()),
                     version,
-                    meta.cfg,
-                    Default::default(),
+                    meta.cfg.clone(),
+                    Some(meta.cfg),
                     meta.env,
                     false,
                     origin,
@@ -199,7 +200,8 @@ impl ChangeFixture {
             } else if meta.path == "/main.rs" || meta.path == "/lib.rs" {
                 assert!(default_crate_root.is_none());
                 default_crate_root = Some(file_id);
-                default_cfg = meta.cfg;
+                default_cfg.extend(meta.cfg.into_iter());
+                default_env.extend(meta.env.iter().map(|(x, y)| (x.to_owned(), y.to_owned())));
                 default_target_data_layout = meta.target_data_layout;
             }
 
@@ -218,9 +220,9 @@ impl ChangeFixture {
                 Edition::CURRENT,
                 Some(CrateName::new("test").unwrap().into()),
                 None,
-                default_cfg,
-                Default::default(),
-                Env::new_for_test_fixture(),
+                default_cfg.clone(),
+                Some(default_cfg),
+                default_env,
                 false,
                 CrateOrigin::Local { repo: None, name: None },
                 default_target_data_layout

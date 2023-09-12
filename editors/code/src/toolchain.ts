@@ -91,8 +91,8 @@ export class Cargo {
     constructor(
         readonly rootFolder: string,
         readonly output: vscode.OutputChannel,
-        readonly env: Record<string, string>
-    ) { }
+        readonly env: Record<string, string>,
+    ) {}
 
     // Made public for testing purposes
     static artifactSpec(args: readonly string[]): ArtifactSpec {
@@ -144,7 +144,7 @@ export class Cargo {
                         this.output.append(message.message.rendered);
                     }
                 },
-                (stderr) => this.output.append(stderr)
+                (stderr) => this.output.append(stderr),
             );
         } catch (err) {
             this.output.show(true);
@@ -170,7 +170,7 @@ export class Cargo {
     private async runCargo(
         cargoArgs: string[],
         onStdoutJson: (obj: any) => void,
-        onStderrString: (data: string) => void
+        onStderrString: (data: string) => void,
     ): Promise<number> {
         const path = await cargoPath();
         return await new Promise((resolve, reject) => {
@@ -240,7 +240,7 @@ export const getPathForExecutable = memoizeAsync(
             if (await isFileAtUri(standardPath)) return standardPath.fsPath;
         }
         return executableName;
-    }
+    },
 );
 
 async function lookupInPath(exec: string): Promise<boolean> {

@@ -8,14 +8,17 @@ use std::{
 
 use hir::{
     db::{DefDatabase, ExpandDatabase, HirDatabase},
-    Adt, AssocItem, Crate, DefWithBody, HasCrate, HasSource, HirDisplay, ModuleDef, Name,
+    Adt, AssocItem, Crate, DefWithBody, HasSource, HirDisplay, ModuleDef, Name,
 };
 use hir_def::{
     body::{BodySourceMap, SyntheticSyntax},
     hir::{ExprId, PatId},
 };
 use hir_ty::{Interner, Substitution, TyExt, TypeFlags};
-use ide::{Analysis, AnnotationConfig, DiagnosticsConfig, InlayHintsConfig, LineCol, RootDatabase};
+use ide::{
+    Analysis, AnnotationConfig, DiagnosticsConfig, InlayFieldsToResolve, InlayHintsConfig, LineCol,
+    RootDatabase,
+};
 use ide_db::{
     base_db::{
         salsa::{self, debug::DebugQueryTable, ParallelDatabase},
@@ -128,7 +131,7 @@ impl flags::AnalysisStats {
         let mut visited_modules = FxHashSet::default();
         let mut visit_queue = Vec::new();
         for krate in krates {
-            let module = krate.root_module(db);
+            let module = krate.root_module();
             let file_id = module.definition_source_file_id(db);
             let file_id = file_id.original_file(db);
             let source_root = db.file_source_root(file_id);
@@ -235,9 +238,7 @@ impl flags::AnalysisStats {
         if let Some(instructions) = total_span.instructions {
             report_metric("total instructions", instructions, "#instr");
         }
-        if let Some(memory) = total_span.memory {
-            report_metric("total memory", memory.allocated.megabytes() as u64, "MB");
-        }
+        report_metric("total memory", total_span.memory.allocated.megabytes() as u64, "MB");
 
         if env::var("RA_COUNT").is_ok() {
             eprintln!("{}", profile::countme::get_all());
@@ -257,7 +258,7 @@ impl flags::AnalysisStats {
             eprintln!("source files: {total_file_size}, macro files: {total_macro_file_size}");
         }
 
-        if self.memory_usage && verbosity.is_verbose() {
+        if verbosity.is_verbose() {
             print_memory_usage(host, vfs);
         }
 
@@ -277,7 +278,7 @@ impl flags::AnalysisStats {
             let Err(e) = db.layout_of_adt(
                 hir_def::AdtId::from(a).into(),
                 Substitution::empty(Interner),
-                a.krate(db).into(),
+                db.trait_environment(a.into()),
             ) else {
                 continue;
             };
@@ -319,9 +320,13 @@ impl flags::AnalysisStats {
 
     fn run_mir_lowering(&self, db: &RootDatabase, bodies: &[DefWithBody], verbosity: Verbosity) {
         let mut sw = self.stop_watch();
-        let all = bodies.len() as u64;
+        let mut all = 0;
         let mut fail = 0;
         for &body in bodies {
+            if matches!(body, DefWithBody::Variant(_)) {
+                continue;
+            }
+            all += 1;
             let Err(e) = db.mir_body(body.into()) else {
                 continue;
             };
@@ -784,6 +789,7 @@ impl flags::AnalysisStats {
                     closure_style: hir::ClosureStyle::ImplFn,
                     max_length: Some(25),
                     closing_brace_hints_min_lines: Some(20),
+                    fields_to_resolve: InlayFieldsToResolve::empty(),
                 },
                 file_id,
                 None,
@@ -814,7 +820,7 @@ impl flags::AnalysisStats {
     }
 
     fn stop_watch(&self) -> StopWatch {
-        StopWatch::start().memory(self.memory_usage)
+        StopWatch::start()
     }
 }
 

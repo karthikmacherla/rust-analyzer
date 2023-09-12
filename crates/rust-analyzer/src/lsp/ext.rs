@@ -704,7 +704,9 @@ pub struct CompletionResolveData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InlayHintResolveData {}
+pub struct InlayHintResolveData {
+    pub file_id: u32,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompletionImport {

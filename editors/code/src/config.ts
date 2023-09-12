@@ -6,10 +6,12 @@ import type { Env } from "./client";
 import { log } from "./util";
 import { expectNotUndefined, unwrapUndefinable } from "./undefinable";
 
-export type RunnableEnvCfg =
-    | undefined
-    | Record<string, string>
-    | { mask?: string; env: Record<string, string> }[];
+export type RunnableEnvCfgItem = {
+    mask?: string;
+    env: Record<string, string>;
+    platform?: string | string[];
+};
+export type RunnableEnvCfg = undefined | Record<string, string> | RunnableEnvCfgItem[];
 
 export class Config {
     readonly extensionId = "rust-lang.rust-analyzer";
@@ -38,7 +40,7 @@ export class Config {
         vscode.workspace.onDidChangeConfiguration(
             this.onDidChangeConfiguration,
             this,
-            ctx.subscriptions
+            ctx.subscriptions,
         );
         this.refreshLogging();
         this.configureLanguage();
@@ -64,7 +66,7 @@ export class Config {
         this.configureLanguage();
 
         const requiresReloadOpt = this.requiresReloadOpts.find((opt) =>
-            event.affectsConfiguration(opt)
+            event.affectsConfiguration(opt),
         );
 
         if (!requiresReloadOpt) return;
@@ -210,16 +212,49 @@ export class Config {
                 Object.entries(extraEnv).map(([k, v]) => [
                     k,
                     typeof v !== "string" ? v.toString() : v,
-                ])
-            )
+                ]),
+            ),
         );
     }
+    get checkOnSave() {
+        return this.get<boolean>("checkOnSave") ?? false;
+    }
+    async toggleCheckOnSave() {
+        const config = this.cfg.inspect<boolean>("checkOnSave") ?? { key: "checkOnSave" };
+        let overrideInLanguage;
+        let target;
+        let value;
+        if (
+            config.workspaceFolderValue !== undefined ||
+            config.workspaceFolderLanguageValue !== undefined
+        ) {
+            target = vscode.ConfigurationTarget.WorkspaceFolder;
+            overrideInLanguage = config.workspaceFolderLanguageValue;
+            value = config.workspaceFolderValue || config.workspaceFolderLanguageValue;
+        } else if (
+            config.workspaceValue !== undefined ||
+            config.workspaceLanguageValue !== undefined
+        ) {
+            target = vscode.ConfigurationTarget.Workspace;
+            overrideInLanguage = config.workspaceLanguageValue;
+            value = config.workspaceValue || config.workspaceLanguageValue;
+        } else if (config.globalValue !== undefined || config.globalLanguageValue !== undefined) {
+            target = vscode.ConfigurationTarget.Global;
+            overrideInLanguage = config.globalLanguageValue;
+            value = config.globalValue || config.globalLanguageValue;
+        } else if (config.defaultValue !== undefined || config.defaultLanguageValue !== undefined) {
+            overrideInLanguage = config.defaultLanguageValue;
+            value = config.defaultValue || config.defaultLanguageValue;
+        }
+        await this.cfg.update("checkOnSave", !(value || false), target || null, overrideInLanguage);
+    }
+
     get traceExtension() {
         return this.get<boolean>("trace.extension");
     }
 
-    get discoverProjectCommand() {
-        return this.get<string[] | undefined>("discoverProjectCommand");
+    get discoverProjectRunner(): string | undefined {
+        return this.get<string | undefined>("discoverProjectRunner");
     }
 
     get problemMatcher(): string[] {
@@ -310,7 +345,7 @@ export class Config {
 // to interact with.
 export function prepareVSCodeConfig<T>(
     resp: T,
-    cb?: (key: Extract<keyof T, string>, res: { [key: string]: any }) => void
+    cb?: (key: Extract<keyof T, string>, res: { [key: string]: any }) => void,
 ): T {
     if (Is.string(resp)) {
         return substituteVSCodeVariableInString(resp) as T;
@@ -353,7 +388,7 @@ export function substituteVariablesInEnv(env: Env): Env {
                 }
             }
             return [`env:${key}`, { deps: [...deps], value }];
-        })
+        }),
     );
 
     const resolved = new Set<string>();
@@ -461,7 +496,7 @@ function computeVscodeVar(varName: string): string | null {
     if (varName in supportedVariables) {
         const fn = expectNotUndefined(
             supportedVariables[varName],
-            `${varName} should not be undefined here`
+            `${varName} should not be undefined here`,
         );
         return fn();
     } else {

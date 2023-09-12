@@ -76,7 +76,7 @@ pub(crate) fn unused_mut(ctx: &DiagnosticsContext<'_>, d: &hir::UnusedMut) -> Di
         "variable does not need to be mutable",
         ast,
     )
-    .experimental() // Not supporting `#[allow(unused_mut)]` leads to false positive.
+    .experimental() // Not supporting `#[allow(unused_mut)]` in proc macros leads to false positive.
     .with_fixes(fixes)
 }
 
@@ -1081,6 +1081,33 @@ fn f() {
                     //^ 💡 error: cannot mutate immutable variable `x`
 }
 "#,
+        );
+    }
+
+    #[test]
+    fn regression_15143() {
+        check_diagnostics(
+            r#"
+        trait Tr {
+            type Ty;
+        }
+
+        struct A;
+
+        impl Tr for A {
+            type Ty = (u32, i64);
+        }
+
+        struct B<T: Tr> {
+            f: <T as Tr>::Ty,
+        }
+
+        fn main(b: B<A>) {
+            let f = b.f.0;
+            f = 5;
+          //^^^^^ 💡 error: cannot mutate immutable variable `f`
+        }
+            "#,
         );
     }
 

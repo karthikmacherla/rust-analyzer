@@ -384,7 +384,7 @@ impl LocalUsages {
         Self(
             Definition::Local(var)
                 .usages(&ctx.sema)
-                .in_scope(SearchScope::single_file(ctx.file_id()))
+                .in_scope(&SearchScope::single_file(ctx.file_id()))
                 .all(),
         )
     }
@@ -531,7 +531,7 @@ impl FunctionBody {
 
     fn extracted_from_trait_impl(&self) -> bool {
         match self.node().ancestors().find_map(ast::Impl::cast) {
-            Some(c) => return c.trait_().is_some(),
+            Some(c) => c.trait_().is_some(),
             None => false,
         }
     }
@@ -750,7 +750,7 @@ impl FunctionBody {
                         .descendants_with_tokens()
                         .filter_map(SyntaxElement::into_token)
                         .filter(|it| matches!(it.kind(), SyntaxKind::IDENT | T![self]))
-                        .flat_map(|t| sema.descend_into_macros(t))
+                        .flat_map(|t| sema.descend_into_macros(t, 0.into()))
                         .for_each(|t| add_name_if_local(t.parent().and_then(ast::NameRef::cast)));
                 }
             }
@@ -810,7 +810,7 @@ impl FunctionBody {
                         (true, konst.body(), Some(sema.to_def(&konst)?.ty(sema.db)))
                     },
                     ast::ConstParam(cp) => {
-                        (true, cp.default_val(), Some(sema.to_def(&cp)?.ty(sema.db)))
+                        (true, cp.default_val()?.expr(), Some(sema.to_def(&cp)?.ty(sema.db)))
                     },
                     ast::ConstBlockPat(cbp) => {
                         let expr = cbp.block_expr().map(ast::Expr::BlockExpr);
@@ -1048,23 +1048,17 @@ impl GenericParent {
 fn generic_parents(parent: &SyntaxNode) -> Vec<GenericParent> {
     let mut list = Vec::new();
     if let Some(parent_item) = parent.ancestors().find_map(ast::Item::cast) {
-        match parent_item {
-            ast::Item::Fn(ref fn_) => {
-                if let Some(parent_parent) = parent_item
-                    .syntax()
-                    .parent()
-                    .and_then(|it| it.parent())
-                    .and_then(ast::Item::cast)
-                {
-                    match parent_parent {
-                        ast::Item::Impl(impl_) => list.push(GenericParent::Impl(impl_)),
-                        ast::Item::Trait(trait_) => list.push(GenericParent::Trait(trait_)),
-                        _ => (),
-                    }
+        if let ast::Item::Fn(ref fn_) = parent_item {
+            if let Some(parent_parent) =
+                parent_item.syntax().parent().and_then(|it| it.parent()).and_then(ast::Item::cast)
+            {
+                match parent_parent {
+                    ast::Item::Impl(impl_) => list.push(GenericParent::Impl(impl_)),
+                    ast::Item::Trait(trait_) => list.push(GenericParent::Trait(trait_)),
+                    _ => (),
                 }
-                list.push(GenericParent::Fn(fn_.clone()));
             }
-            _ => (),
+            list.push(GenericParent::Fn(fn_.clone()));
         }
     }
     list
@@ -1385,31 +1379,30 @@ enum FlowHandler {
 
 impl FlowHandler {
     fn from_ret_ty(fun: &Function, ret_ty: &FunType) -> FlowHandler {
-        match &fun.control_flow.kind {
-            None => FlowHandler::None,
-            Some(flow_kind) => {
-                let action = flow_kind.clone();
-                if let FunType::Unit = ret_ty {
-                    match flow_kind {
-                        FlowKind::Return(None)
-                        | FlowKind::Break(_, None)
-                        | FlowKind::Continue(_) => FlowHandler::If { action },
-                        FlowKind::Return(_) | FlowKind::Break(_, _) => {
-                            FlowHandler::IfOption { action }
-                        }
-                        FlowKind::Try { kind } => FlowHandler::Try { kind: kind.clone() },
-                    }
-                } else {
-                    match flow_kind {
-                        FlowKind::Return(None)
-                        | FlowKind::Break(_, None)
-                        | FlowKind::Continue(_) => FlowHandler::MatchOption { none: action },
-                        FlowKind::Return(_) | FlowKind::Break(_, _) => {
-                            FlowHandler::MatchResult { err: action }
-                        }
-                        FlowKind::Try { kind } => FlowHandler::Try { kind: kind.clone() },
-                    }
+        if fun.contains_tail_expr {
+            return FlowHandler::None;
+        }
+        let Some(action) = fun.control_flow.kind.clone() else {
+            return FlowHandler::None;
+        };
+
+        if let FunType::Unit = ret_ty {
+            match action {
+                FlowKind::Return(None) | FlowKind::Break(_, None) | FlowKind::Continue(_) => {
+                    FlowHandler::If { action }
                 }
+                FlowKind::Return(_) | FlowKind::Break(_, _) => FlowHandler::IfOption { action },
+                FlowKind::Try { kind } => FlowHandler::Try { kind },
+            }
+        } else {
+            match action {
+                FlowKind::Return(None) | FlowKind::Break(_, None) | FlowKind::Continue(_) => {
+                    FlowHandler::MatchOption { none: action }
+                }
+                FlowKind::Return(_) | FlowKind::Break(_, _) => {
+                    FlowHandler::MatchResult { err: action }
+                }
+                FlowKind::Try { kind } => FlowHandler::Try { kind },
             }
         }
     }
@@ -1654,11 +1647,7 @@ impl Function {
 
     fn make_ret_ty(&self, ctx: &AssistContext<'_>, module: hir::Module) -> Option<ast::RetType> {
         let fun_ty = self.return_type(ctx);
-        let handler = if self.contains_tail_expr {
-            FlowHandler::None
-        } else {
-            FlowHandler::from_ret_ty(self, &fun_ty)
-        };
+        let handler = FlowHandler::from_ret_ty(self, &fun_ty);
         let ret_ty = match &handler {
             FlowHandler::None => {
                 if matches!(fun_ty, FunType::Unit) {
@@ -1728,16 +1717,12 @@ fn make_body(
     fun: &Function,
 ) -> ast::BlockExpr {
     let ret_ty = fun.return_type(ctx);
-    let handler = if fun.contains_tail_expr {
-        FlowHandler::None
-    } else {
-        FlowHandler::from_ret_ty(fun, &ret_ty)
-    };
+    let handler = FlowHandler::from_ret_ty(fun, &ret_ty);
 
     let block = match &fun.body {
         FunctionBody::Expr(expr) => {
             let expr = rewrite_body_segment(ctx, &fun.params, &handler, expr.syntax());
-            let expr = ast::Expr::cast(expr).unwrap();
+            let expr = ast::Expr::cast(expr).expect("Body segment should be an expr");
             match expr {
                 ast::Expr::BlockExpr(block) => {
                     // If the extracted expression is itself a block, there is no need to wrap it inside another block.
@@ -1877,9 +1862,8 @@ fn with_tail_expr(block: ast::BlockExpr, tail_expr: ast::Expr) -> ast::BlockExpr
 
     if let Some(stmt_list) = block.stmt_list() {
         stmt_list.syntax().children_with_tokens().for_each(|node_or_token| {
-            match &node_or_token {
-                syntax::NodeOrToken::Token(_) => elements.push(node_or_token),
-                _ => (),
+            if let syntax::NodeOrToken::Token(_) = &node_or_token {
+                elements.push(node_or_token)
             };
         });
     }
@@ -1943,12 +1927,18 @@ fn fix_param_usages(ctx: &AssistContext<'_>, params: &[Param], syntax: &SyntaxNo
                 Some(ast::Expr::RefExpr(node))
                     if param.kind() == ParamKind::MutRef && node.mut_token().is_some() =>
                 {
-                    ted::replace(node.syntax(), node.expr().unwrap().syntax());
+                    ted::replace(
+                        node.syntax(),
+                        node.expr().expect("RefExpr::expr() cannot be None").syntax(),
+                    );
                 }
                 Some(ast::Expr::RefExpr(node))
                     if param.kind() == ParamKind::SharedRef && node.mut_token().is_none() =>
                 {
-                    ted::replace(node.syntax(), node.expr().unwrap().syntax());
+                    ted::replace(
+                        node.syntax(),
+                        node.expr().expect("RefExpr::expr() cannot be None").syntax(),
+                    );
                 }
                 Some(_) | None => {
                     let p = &make::expr_prefix(T![*], usage.clone()).clone_for_update();
@@ -4471,7 +4461,7 @@ async fn foo() -> Result<(), ()> {
 "#,
             r#"
 async fn foo() -> Result<(), ()> {
-    fun_name().await?
+    fun_name().await
 }
 
 async fn $0fun_name() -> Result<(), ()> {
@@ -4690,7 +4680,7 @@ fn $0fun_name() {
         check_assist(
             extract_function,
             r#"
-//- minicore: result
+//- minicore: result, try
 fn foo() -> Result<(), i64> {
     $0Result::<i32, i64>::Ok(0)?;
     Ok(())$0
@@ -4698,7 +4688,7 @@ fn foo() -> Result<(), i64> {
 "#,
             r#"
 fn foo() -> Result<(), i64> {
-    fun_name()?
+    fun_name()
 }
 
 fn $0fun_name() -> Result<(), i64> {
@@ -5754,6 +5744,34 @@ fn $0fun_name<T, V>(t: T, v: V) -> i32 where T: Into<i32> + Copy, V: Into<i32> {
     }
 
     #[test]
+    fn tail_expr_no_extra_control_flow() {
+        check_assist(
+            extract_function,
+            r#"
+//- minicore: result
+fn fallible() -> Result<(), ()> {
+    $0if true {
+        return Err(());
+    }
+    Ok(())$0
+}
+"#,
+            r#"
+fn fallible() -> Result<(), ()> {
+    fun_name()
+}
+
+fn $0fun_name() -> Result<(), ()> {
+    if true {
+        return Err(());
+    }
+    Ok(())
+}
+"#,
+        );
+    }
+
+    #[test]
     fn non_tail_expr_of_tail_expr_loop() {
         check_assist(
             extract_function,
@@ -5800,12 +5818,6 @@ fn $0fun_name() -> ControlFlow<()> {
             extract_function,
             r#"
 //- minicore: option, try
-impl<T> core::ops::Try for Option<T> {
-    type Output = T;
-    type Residual = Option<!>;
-}
-impl<T> core::ops::FromResidual for Option<T> {}
-
 fn f() -> Option<()> {
     if true {
         let a = $0if true {
@@ -5820,12 +5832,6 @@ fn f() -> Option<()> {
 }
 "#,
             r#"
-impl<T> core::ops::Try for Option<T> {
-    type Output = T;
-    type Residual = Option<!>;
-}
-impl<T> core::ops::FromResidual for Option<T> {}
-
 fn f() -> Option<()> {
     if true {
         let a = fun_name()?;;
@@ -5852,12 +5858,6 @@ fn $0fun_name() -> Option<()> {
             extract_function,
             r#"
 //- minicore: option, try
-impl<T> core::ops::Try for Option<T> {
-    type Output = T;
-    type Residual = Option<!>;
-}
-impl<T> core::ops::FromResidual for Option<T> {}
-
 fn f() -> Option<()> {
     if true {
         $0{
@@ -5874,15 +5874,9 @@ fn f() -> Option<()> {
 }
 "#,
             r#"
-impl<T> core::ops::Try for Option<T> {
-    type Output = T;
-    type Residual = Option<!>;
-}
-impl<T> core::ops::FromResidual for Option<T> {}
-
 fn f() -> Option<()> {
     if true {
-        fun_name()?
+        fun_name()
     } else {
         None
     }

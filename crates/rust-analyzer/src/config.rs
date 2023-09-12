@@ -13,8 +13,9 @@ use cfg::{CfgAtom, CfgDiff};
 use flycheck::FlycheckConfig;
 use ide::{
     AssistConfig, CallableSnippets, CompletionConfig, DiagnosticsConfig, ExprFillDefaultMode,
-    HighlightConfig, HighlightRelatedConfig, HoverConfig, HoverDocFormat, InlayHintsConfig,
-    JoinLinesConfig, MemoryLayoutHoverConfig, MemoryLayoutHoverRenderKind, Snippet, SnippetScope,
+    HighlightConfig, HighlightRelatedConfig, HoverConfig, HoverDocFormat, InlayFieldsToResolve,
+    InlayHintsConfig, JoinLinesConfig, MemoryLayoutHoverConfig, MemoryLayoutHoverRenderKind,
+    Snippet, SnippetScope,
 };
 use ide_db::{
     imports::insert_use::{ImportGranularity, InsertUseConfig, PrefixKind},
@@ -150,18 +151,22 @@ config_data! {
         ///
         /// Set to `"all"` to pass `--all-features` to Cargo.
         check_features | checkOnSave_features: Option<CargoFeaturesDef>  = "null",
+        /// List of `cargo check` (or other command specified in `check.command`) diagnostics to ignore.
+        ///
+        /// For example for `cargo check`: `dead_code`, `unused_imports`, `unused_variables`,...
+        check_ignore: FxHashSet<String> = "[]",
         /// Specifies the working directory for running checks.
         /// - "workspace": run checks for workspaces in the corresponding workspaces' root directories.
         // FIXME: Ideally we would support this in some way
-        ///   This falls back to "root" if `#rust-analyzer.cargo.checkOnSave.invocationStrategy#` is set to `once`.
+        ///   This falls back to "root" if `#rust-analyzer.cargo.check.invocationStrategy#` is set to `once`.
         /// - "root": run checks in the project's root directory.
-        /// This config only has an effect when `#rust-analyzer.cargo.buildScripts.overrideCommand#`
+        /// This config only has an effect when `#rust-analyzer.cargo.check.overrideCommand#`
         /// is set.
         check_invocationLocation | checkOnSave_invocationLocation: InvocationLocation = "\"workspace\"",
-        /// Specifies the invocation strategy to use when running the checkOnSave command.
+        /// Specifies the invocation strategy to use when running the check command.
         /// If `per_workspace` is set, the command will be executed for each workspace.
         /// If `once` is set, the command will be executed once.
-        /// This config only has an effect when `#rust-analyzer.cargo.buildScripts.overrideCommand#`
+        /// This config only has an effect when `#rust-analyzer.cargo.check.overrideCommand#`
         /// is set.
         check_invocationStrategy | checkOnSave_invocationStrategy: InvocationStrategy = "\"per_workspace\"",
         /// Whether to pass `--no-default-features` to Cargo. Defaults to
@@ -1101,6 +1106,7 @@ impl Config {
             remap_prefix: self.data.diagnostics_remapPrefix.clone(),
             warnings_as_info: self.data.diagnostics_warningsAsInfo.clone(),
             warnings_as_hint: self.data.diagnostics_warningsAsHint.clone(),
+            check_ignore: self.data.check_ignore.clone(),
         }
     }
 
@@ -1333,6 +1339,18 @@ impl Config {
     }
 
     pub fn inlay_hints(&self) -> InlayHintsConfig {
+        let client_capability_fields = self
+            .caps
+            .text_document
+            .as_ref()
+            .and_then(|text| text.inlay_hint.as_ref())
+            .and_then(|inlay_hint_caps| inlay_hint_caps.resolve_support.as_ref())
+            .map(|inlay_resolve| inlay_resolve.properties.iter())
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<FxHashSet<_>>();
+
         InlayHintsConfig {
             render_colons: self.data.inlayHints_renderColons,
             type_hints: self.data.inlayHints_typeHints_enable,
@@ -1392,6 +1410,13 @@ impl Config {
                 Some(self.data.inlayHints_closingBraceHints_minLines)
             } else {
                 None
+            },
+            fields_to_resolve: InlayFieldsToResolve {
+                resolve_text_edits: client_capability_fields.contains("textEdits"),
+                resolve_hint_tooltip: client_capability_fields.contains("tooltip"),
+                resolve_label_tooltip: client_capability_fields.contains("label.tooltip"),
+                resolve_label_location: client_capability_fields.contains("label.location"),
+                resolve_label_command: client_capability_fields.contains("label.command"),
             },
         }
     }

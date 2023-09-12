@@ -149,16 +149,12 @@ impl HygieneInfo {
                     token_id = unshifted;
                     (&attr_args.1, self.attr_input_or_mac_def_start?)
                 }
-                None => (
-                    &self.macro_arg.1,
-                    InFile::new(loc.kind.file_id(), loc.kind.arg(db)?.text_range().start()),
-                ),
+                None => (&self.macro_arg.1, loc.kind.arg(db)?.map(|it| it.text_range().start())),
             },
             _ => match origin {
-                mbe::Origin::Call => (
-                    &self.macro_arg.1,
-                    InFile::new(loc.kind.file_id(), loc.kind.arg(db)?.text_range().start()),
-                ),
+                mbe::Origin::Call => {
+                    (&self.macro_arg.1, loc.kind.arg(db)?.map(|it| it.text_range().start()))
+                }
                 mbe::Origin::Def => match (&self.macro_def, &self.attr_input_or_mac_def_start) {
                     (TokenExpander::DeclarativeMacro(expander), Some(tt)) => {
                         (&expander.def_site_token_map, *tt)
@@ -177,7 +173,7 @@ fn make_hygiene_info(
     db: &dyn ExpandDatabase,
     macro_file: MacroFile,
     loc: &MacroCallLoc,
-) -> Option<HygieneInfo> {
+) -> HygieneInfo {
     let def = loc.def.ast_id().left().and_then(|id| {
         let def_tt = match id.to_node(db) {
             ast::Macro::MacroRules(mac) => mac.token_tree()?,
@@ -198,9 +194,9 @@ fn make_hygiene_info(
         _ => None,
     });
 
-    let macro_def = db.macro_def(loc.def);
+    let macro_def = db.macro_expander(loc.def);
     let (_, exp_map) = db.parse_macro_expansion(macro_file).value;
-    let macro_arg = db.macro_arg(macro_file.macro_call_id).unwrap_or_else(|| {
+    let macro_arg = db.macro_arg(macro_file.macro_call_id).value.unwrap_or_else(|| {
         Arc::new((
             tt::Subtree { delimiter: tt::Delimiter::UNSPECIFIED, token_trees: Vec::new() },
             Default::default(),
@@ -208,7 +204,7 @@ fn make_hygiene_info(
         ))
     });
 
-    Some(HygieneInfo {
+    HygieneInfo {
         file: macro_file,
         attr_input_or_mac_def_start: attr_input_or_mac_def
             .map(|it| it.map(|tt| tt.syntax().text_range().start())),
@@ -216,7 +212,7 @@ fn make_hygiene_info(
         macro_arg,
         macro_def,
         exp_map,
-    })
+    }
 }
 
 impl HygieneFrame {
@@ -225,8 +221,7 @@ impl HygieneFrame {
             None => (None, None, false),
             Some(macro_file) => {
                 let loc = db.lookup_intern_macro_call(macro_file.macro_call_id);
-                let info =
-                    make_hygiene_info(db, macro_file, &loc).map(|info| (loc.kind.file_id(), info));
+                let info = Some((make_hygiene_info(db, macro_file, &loc), loc.kind.file_id()));
                 match loc.def.kind {
                     MacroDefKind::Declarative(_) => {
                         (info, Some(loc.def.krate), loc.def.local_inner)
@@ -240,17 +235,14 @@ impl HygieneFrame {
             }
         };
 
-        let (calling_file, info) = match info {
-            None => {
-                return HygieneFrame {
-                    expansion: None,
-                    local_inner,
-                    krate,
-                    call_site: None,
-                    def_site: None,
-                };
-            }
-            Some(it) => it,
+        let Some((info, calling_file)) = info else {
+            return HygieneFrame {
+                expansion: None,
+                local_inner,
+                krate,
+                call_site: None,
+                def_site: None,
+            };
         };
 
         let def_site = info.attr_input_or_mac_def_start.map(|it| db.hygiene_frame(it.file_id));

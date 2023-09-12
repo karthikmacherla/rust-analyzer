@@ -12,7 +12,7 @@ xflags::xflags! {
     /// LSP server for the Rust programming language.
     ///
     /// Subcommands and their flags do not provide any stability guarantees and may be removed or
-    /// changed without notice. Top-level flags that are not are marked as [Unstable] provide
+    /// changed without notice. Top-level flags that are not marked as [Unstable] provide
     /// backwards-compatibility and may be relied on.
     cmd rust-analyzer {
         /// Verbosity level, can be repeated multiple times.
@@ -62,8 +62,6 @@ xflags::xflags! {
             optional --randomize
             /// Run type inference in parallel.
             optional --parallel
-            /// Collect memory usage statistics.
-            optional --memory-usage
             /// Print the total length of all source and macro files (whitespace is not counted).
             optional --source-stats
 
@@ -113,7 +111,7 @@ xflags::xflags! {
         }
 
         cmd ssr {
-            /// A structured search replace rule (`$a.foo($b) ==> bar($a, $b)`)
+            /// A structured search replace rule (`$a.foo($b) ==>> bar($a, $b)`)
             repeated rule: SsrRule
         }
 
@@ -191,7 +189,6 @@ pub struct AnalysisStats {
     pub output: Option<OutputFormat>,
     pub randomize: bool,
     pub parallel: bool,
-    pub memory_usage: bool,
     pub source_stats: bool,
     pub only: Option<String>,
     pub with_deps: bool,

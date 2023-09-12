@@ -322,7 +322,7 @@ Position[]
 
 ```rust
 fn main() {
-    let x: Vec<()>/*cursor here*/ = vec![]
+    let x: Vec<()>/*cursor here*/ = vec![];
 }
 ```
 
@@ -362,7 +362,7 @@ interface RunnablesParams {
 ```typescript
 interface Runnable {
     label: string;
-    /// If this Runnable is associated with a specific function/module, etc, the location of this item
+    /// If this Runnable is associated with a specific function/module, etc., the location of this item
     location?: LocationLink;
     /// Running things is necessary technology specific, `kind` needs to be advertised via server capabilities,
     // the type of `args` is specific to `kind`. The actual running is handled by the client.

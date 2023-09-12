@@ -4,7 +4,7 @@ exclude = ["crates/proc-macro-test/imp"]
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.66"
+rust-version = "1.70"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["rust-analyzer team"]
@@ -86,7 +86,7 @@ proc-macro-test = { path = "./crates/proc-macro-test" }
 # In-tree crates that are published separately and follow semver. See lib/README.md
 line-index = { version = "0.1.0-pre.1" }
 la-arena = { version = "0.3.1" }
-lsp-server = { version = "0.7.1" }
+lsp-server = { version = "0.7.4" }
 
 # non-local crates
 smallvec = { version = "1.10.0", features = [
@@ -103,4 +103,9 @@ triomphe = { version = "0.1.8", default-features = false, features = ["std"] }
 # can't upgrade due to dashmap depending on 0.12.3 currently
 hashbrown = { version = "0.12.3", features = ["inline-more"], default-features = false }
 
-rustc_lexer = { version = "0.1.0", package = "ra-ap-rustc_lexer" }
+rustc_lexer = { version = "0.10.0", package = "ra-ap-rustc_lexer" }
+rustc_parse_format = { version = "0.10.0", package = "ra-ap-rustc_parse_format", default-features = false }
+
+# Upstream broke this for us so we can't update it
+rustc_abi = { version = "0.0.20221221", package = "hkalbasi-rustc-ap-rustc_abi", default-features = false }
+rustc_index = { version = "0.0.20221221", package = "hkalbasi-rustc-ap-rustc_index", default-features = false }

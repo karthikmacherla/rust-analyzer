@@ -150,6 +150,36 @@ fn min_align_of_val() {
 }
 
 #[test]
+fn type_name() {
+    check_str(
+        r#"
+        extern "rust-intrinsic" {
+            pub fn type_name<T: ?Sized>() -> &'static str;
+        }
+
+        const GOAL: &str = type_name::<i32>();
+        "#,
+        "i32",
+    );
+    check_str(
+        r#"
+        extern "rust-intrinsic" {
+            pub fn type_name<T: ?Sized>() -> &'static str;
+        }
+
+        mod mod1 {
+            pub mod mod2 {
+                pub struct Ty;
+            }
+        }
+
+        const GOAL: &str = type_name::<mod1::mod2::Ty>();
+        "#,
+        "mod1::mod2::Ty",
+    );
+}
+
+#[test]
 fn transmute() {
     check_number(
         r#"
@@ -218,6 +248,28 @@ fn wrapping_add() {
         const GOAL: u8 = wrapping_add(10, 250);
         "#,
         4,
+    );
+}
+
+#[test]
+fn ptr_offset_from() {
+    check_number(
+        r#"
+        //- minicore: index, slice, coerce_unsized
+        extern "rust-intrinsic" {
+            pub fn ptr_offset_from<T>(ptr: *const T, base: *const T) -> isize;
+            pub fn ptr_offset_from_unsigned<T>(ptr: *const T, base: *const T) -> usize;
+        }
+
+        const GOAL: isize = {
+            let x = [1, 2, 3, 4, 5i32];
+            let r1 = -ptr_offset_from(&x[0], &x[4]);
+            let r2 = ptr_offset_from(&x[3], &x[1]);
+            let r3 = ptr_offset_from_unsigned(&x[3], &x[0]) as isize;
+            r3 * 100 + r2 * 10 + r1
+        };
+        "#,
+        324,
     );
 }
 
@@ -408,6 +460,8 @@ fn atomic() {
             pub fn atomic_nand_seqcst<T: Copy>(dst: *mut T, src: T) -> T;
             pub fn atomic_or_release<T: Copy>(dst: *mut T, src: T) -> T;
             pub fn atomic_xor_seqcst<T: Copy>(dst: *mut T, src: T) -> T;
+            pub fn atomic_fence_seqcst();
+            pub fn atomic_singlethreadfence_acqrel();
         }
 
         fn should_not_reach() {
@@ -422,6 +476,7 @@ fn atomic() {
             if (30, true) != atomic_cxchg_release_seqcst(&mut y, 30, 40) {
                 should_not_reach();
             }
+            atomic_fence_seqcst();
             if (40, false) != atomic_cxchg_release_seqcst(&mut y, 30, 50) {
                 should_not_reach();
             }
@@ -429,6 +484,7 @@ fn atomic() {
                 should_not_reach();
             }
             let mut z = atomic_xsub_seqcst(&mut x, -200);
+            atomic_singlethreadfence_acqrel();
             atomic_xor_seqcst(&mut x, 1024);
             atomic_load_seqcst(&x) + z * 3 + atomic_load_seqcst(&y) * 2
         };
@@ -443,24 +499,26 @@ fn offset() {
         r#"
         //- minicore: coerce_unsized, index, slice
         extern "rust-intrinsic" {
-            pub fn offset<T>(dst: *const T, offset: isize) -> *const T;
+            pub fn offset<Ptr, Delta>(dst: Ptr, offset: Delta) -> Ptr;
+            pub fn arith_offset<T>(dst: *const T, offset: isize) -> *const T;
         }
 
-        const GOAL: u8 = unsafe {
-            let ar: &[(u8, u8, u8)] = &[
+        const GOAL: i32 = unsafe {
+            let ar: &[(i32, i32, i32)] = &[
                 (10, 11, 12),
                 (20, 21, 22),
                 (30, 31, 32),
                 (40, 41, 42),
                 (50, 51, 52),
             ];
-            let ar: *const [(u8, u8, u8)] = ar;
-            let ar = ar as *const (u8, u8, u8);
-            let element = *offset(ar, 2);
-            element.1
+            let ar: *const [(i32, i32, i32)] = ar;
+            let ar = ar as *const (i32, i32, i32);
+            let element3 = *offset(ar, 2usize);
+            let element4 = *arith_offset(ar, 3);
+            element3.1 * 100 + element4.0
         };
         "#,
-        31,
+        3140,
     );
 }
 
@@ -511,6 +569,42 @@ fn copy_nonoverlapping() {
 }
 
 #[test]
+fn write_bytes() {
+    check_number(
+        r#"
+        extern "rust-intrinsic" {
+            fn write_bytes<T>(dst: *mut T, val: u8, count: usize);
+        }
+
+        const GOAL: i32 = unsafe {
+            let mut x = 2;
+            write_bytes(&mut x, 5, 1);
+            x
+        };
+        "#,
+        0x05050505,
+    );
+}
+
+#[test]
+fn write_via_move() {
+    check_number(
+        r#"
+        extern "rust-intrinsic" {
+            fn write_via_move<T>(ptr: *mut T, value: T);
+        }
+
+        const GOAL: i32 = unsafe {
+            let mut x = 2;
+            write_via_move(&mut x, 100);
+            x
+        };
+        "#,
+        100,
+    );
+}
+
+#[test]
 fn copy() {
     check_number(
         r#"
@@ -542,6 +636,20 @@ fn ctpop() {
         const GOAL: i64 = ctpop(-29);
         "#,
         61,
+    );
+}
+
+#[test]
+fn ctlz() {
+    check_number(
+        r#"
+        extern "rust-intrinsic" {
+            pub fn ctlz<T: Copy>(x: T) -> T;
+        }
+
+        const GOAL: u8 = ctlz(0b0001_1100_u8);
+        "#,
+        3,
     );
 }
 

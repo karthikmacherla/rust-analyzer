@@ -131,7 +131,7 @@ pub fn identity_when_valid(_attr: TokenStream, item: TokenStream) -> TokenStream
             .as_call_id_with_errors(&db, krate, |path| {
                 resolver
                     .resolve_path_as_macro(&db, &path, Some(MacroSubNs::Bang))
-                    .map(|it| macro_id_to_def_id(&db, it))
+                    .map(|(it, _)| macro_id_to_def_id(&db, it))
             })
             .unwrap();
         let macro_call_id = res.value.unwrap();
@@ -187,7 +187,7 @@ pub fn identity_when_valid(_attr: TokenStream, item: TokenStream) -> TokenStream
         let range: Range<usize> = range.into();
 
         if show_token_ids {
-            if let Some((tree, map, _)) = arg.as_deref() {
+            if let Some((tree, map, _)) = arg.value.as_deref() {
                 let tt_range = call.token_tree().unwrap().syntax().text_range();
                 let mut ranges = Vec::new();
                 extract_id_ranges(&mut ranges, map, tree);

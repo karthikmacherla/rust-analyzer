@@ -29,6 +29,7 @@ use itertools::Itertools;
 use la_arena::ArenaMap;
 use smallvec::SmallVec;
 use stdx::never;
+use triomphe::Arc;
 
 use crate::{
     consteval::try_const_usize,
@@ -43,26 +44,19 @@ use crate::{
     AdtId, AliasEq, AliasTy, Binders, CallableDefId, CallableSig, Const, ConstScalar, ConstValue,
     DomainGoal, GenericArg, ImplTraitId, Interner, Lifetime, LifetimeData, LifetimeOutlives,
     MemoryMap, Mutability, OpaqueTy, ProjectionTy, ProjectionTyExt, QuantifiedWhereClause, Scalar,
-    Substitution, TraitRef, TraitRefExt, Ty, TyExt, WhereClause,
+    Substitution, TraitEnvironment, TraitRef, TraitRefExt, Ty, TyExt, WhereClause,
 };
 
 pub trait HirWrite: fmt::Write {
-    fn start_location_link(&mut self, location: ModuleDefId);
-    fn end_location_link(&mut self);
+    fn start_location_link(&mut self, _location: ModuleDefId) {}
+    fn end_location_link(&mut self) {}
 }
 
 // String will ignore link metadata
-impl HirWrite for String {
-    fn start_location_link(&mut self, _: ModuleDefId) {}
-
-    fn end_location_link(&mut self) {}
-}
+impl HirWrite for String {}
 
 // `core::Formatter` will ignore metadata
-impl HirWrite for fmt::Formatter<'_> {
-    fn start_location_link(&mut self, _: ModuleDefId) {}
-    fn end_location_link(&mut self) {}
-}
+impl HirWrite for fmt::Formatter<'_> {}
 
 pub struct HirFormatter<'a> {
     pub db: &'a dyn HirDatabase,
@@ -454,7 +448,9 @@ fn render_const_scalar(
 ) -> Result<(), HirDisplayError> {
     // FIXME: We need to get krate from the final callers of the hir display
     // infrastructure and have it here as a field on `f`.
-    let krate = *f.db.crate_graph().crates_in_topological_order().last().unwrap();
+    let trait_env = Arc::new(TraitEnvironment::empty(
+        *f.db.crate_graph().crates_in_topological_order().last().unwrap(),
+    ));
     match ty.kind(Interner) {
         TyKind::Scalar(s) => match s {
             Scalar::Bool => write!(f, "{}", if b[0] == 0 { false } else { true }),
@@ -497,7 +493,7 @@ fn render_const_scalar(
             TyKind::Slice(ty) => {
                 let addr = usize::from_le_bytes(b[0..b.len() / 2].try_into().unwrap());
                 let count = usize::from_le_bytes(b[b.len() / 2..].try_into().unwrap());
-                let Ok(layout) = f.db.layout_of_ty(ty.clone(), krate) else {
+                let Ok(layout) = f.db.layout_of_ty(ty.clone(), trait_env) else {
                     return f.write_str("<layout-error>");
                 };
                 let size_one = layout.size.bytes_usize();
@@ -523,7 +519,7 @@ fn render_const_scalar(
                 let Ok(t) = memory_map.vtable.ty(ty_id) else {
                     return f.write_str("<ty-missing-in-vtable-map>");
                 };
-                let Ok(layout) = f.db.layout_of_ty(t.clone(), krate) else {
+                let Ok(layout) = f.db.layout_of_ty(t.clone(), trait_env) else {
                     return f.write_str("<layout-error>");
                 };
                 let size = layout.size.bytes_usize();
@@ -555,7 +551,7 @@ fn render_const_scalar(
                         return f.write_str("<layout-error>");
                     }
                 });
-                let Ok(layout) = f.db.layout_of_ty(t.clone(), krate) else {
+                let Ok(layout) = f.db.layout_of_ty(t.clone(), trait_env) else {
                     return f.write_str("<layout-error>");
                 };
                 let size = layout.size.bytes_usize();
@@ -567,7 +563,7 @@ fn render_const_scalar(
             }
         },
         TyKind::Tuple(_, subst) => {
-            let Ok(layout) = f.db.layout_of_ty(ty.clone(), krate) else {
+            let Ok(layout) = f.db.layout_of_ty(ty.clone(), trait_env.clone()) else {
                 return f.write_str("<layout-error>");
             };
             f.write_str("(")?;
@@ -580,7 +576,7 @@ fn render_const_scalar(
                 }
                 let ty = ty.assert_ty_ref(Interner); // Tuple only has type argument
                 let offset = layout.fields.offset(id).bytes_usize();
-                let Ok(layout) = f.db.layout_of_ty(ty.clone(), krate) else {
+                let Ok(layout) = f.db.layout_of_ty(ty.clone(), trait_env.clone()) else {
                     f.write_str("<layout-error>")?;
                     continue;
                 };
@@ -590,7 +586,7 @@ fn render_const_scalar(
             f.write_str(")")
         }
         TyKind::Adt(adt, subst) => {
-            let Ok(layout) = f.db.layout_of_adt(adt.0, subst.clone(), krate) else {
+            let Ok(layout) = f.db.layout_of_adt(adt.0, subst.clone(), trait_env.clone()) else {
                 return f.write_str("<layout-error>");
             };
             match adt.0 {
@@ -602,7 +598,7 @@ fn render_const_scalar(
                         &data.variant_data,
                         f,
                         &field_types,
-                        adt.0.module(f.db.upcast()).krate(),
+                        f.db.trait_environment(adt.0.into()),
                         &layout,
                         subst,
                         b,
@@ -614,7 +610,7 @@ fn render_const_scalar(
                 }
                 hir_def::AdtId::EnumId(e) => {
                     let Some((var_id, var_layout)) =
-                        detect_variant_from_bytes(&layout, f.db, krate, b, e)
+                        detect_variant_from_bytes(&layout, f.db, trait_env.clone(), b, e)
                     else {
                         return f.write_str("<failed-to-detect-variant>");
                     };
@@ -626,7 +622,7 @@ fn render_const_scalar(
                         &data.variant_data,
                         f,
                         &field_types,
-                        adt.0.module(f.db.upcast()).krate(),
+                        f.db.trait_environment(adt.0.into()),
                         &var_layout,
                         subst,
                         b,
@@ -645,7 +641,7 @@ fn render_const_scalar(
             let Some(len) = try_const_usize(f.db, len) else {
                 return f.write_str("<unknown-array-len>");
             };
-            let Ok(layout) = f.db.layout_of_ty(ty.clone(), krate) else {
+            let Ok(layout) = f.db.layout_of_ty(ty.clone(), trait_env) else {
                 return f.write_str("<layout-error>");
             };
             let size_one = layout.size.bytes_usize();
@@ -684,7 +680,7 @@ fn render_variant_after_name(
     data: &VariantData,
     f: &mut HirFormatter<'_>,
     field_types: &ArenaMap<LocalFieldId, Binders<Ty>>,
-    krate: CrateId,
+    trait_env: Arc<TraitEnvironment>,
     layout: &Layout,
     subst: &Substitution,
     b: &[u8],
@@ -695,7 +691,7 @@ fn render_variant_after_name(
             let render_field = |f: &mut HirFormatter<'_>, id: LocalFieldId| {
                 let offset = layout.fields.offset(u32::from(id.into_raw()) as usize).bytes_usize();
                 let ty = field_types[id].clone().substitute(Interner, subst);
-                let Ok(layout) = f.db.layout_of_ty(ty.clone(), krate) else {
+                let Ok(layout) = f.db.layout_of_ty(ty.clone(), trait_env.clone()) else {
                     return f.write_str("<layout-error>");
                 };
                 let size = layout.size.bytes_usize();
@@ -882,6 +878,13 @@ impl HirDisplay for Ty {
             TyKind::FnDef(def, parameters) => {
                 let def = from_chalk(db, *def);
                 let sig = db.callable_item_signature(def).substitute(Interner, parameters);
+
+                if f.display_target.is_source_code() {
+                    // `FnDef` is anonymous and there's no surface syntax for it. Show it as a
+                    // function pointer type.
+                    return sig.hir_fmt(f);
+                }
+
                 f.start_location_link(def.into());
                 match def {
                     CallableDefId::FunctionId(ff) => {
@@ -1806,6 +1809,25 @@ impl HirDisplay for Path {
             }
         }
 
+        // Convert trait's `Self` bound back to the surface syntax. Note there is no associated
+        // trait, so there can only be one path segment that `has_self_type`. The `Self` type
+        // itself can contain further qualified path through, which will be handled by recursive
+        // `hir_fmt`s.
+        //
+        // `trait_mod::Trait<Self = type_mod::Type, Args>::Assoc`
+        // =>
+        // `<type_mod::Type as trait_mod::Trait<Args>>::Assoc`
+        let trait_self_ty = self.segments().iter().find_map(|seg| {
+            let generic_args = seg.args_and_bindings?;
+            generic_args.has_self_type.then(|| &generic_args.args[0])
+        });
+        if let Some(ty) = trait_self_ty {
+            write!(f, "<")?;
+            ty.hir_fmt(f)?;
+            write!(f, " as ")?;
+            // Now format the path of the trait...
+        }
+
         for (seg_idx, segment) in self.segments().iter().enumerate() {
             if !matches!(self.kind(), PathKind::Plain) || seg_idx > 0 {
                 write!(f, "::")?;
@@ -1837,15 +1859,12 @@ impl HirDisplay for Path {
                     return Ok(());
                 }
 
-                write!(f, "<")?;
                 let mut first = true;
-                for arg in generic_args.args.iter() {
+                // Skip the `Self` bound if exists. It's handled outside the loop.
+                for arg in &generic_args.args[generic_args.has_self_type as usize..] {
                     if first {
                         first = false;
-                        if generic_args.has_self_type {
-                            // FIXME: Convert to `<Ty as Trait>` form.
-                            write!(f, "Self = ")?;
-                        }
+                        write!(f, "<")?;
                     } else {
                         write!(f, ", ")?;
                     }
@@ -1854,6 +1873,7 @@ impl HirDisplay for Path {
                 for binding in generic_args.bindings.iter() {
                     if first {
                         first = false;
+                        write!(f, "<")?;
                     } else {
                         write!(f, ", ")?;
                     }
@@ -1869,9 +1889,20 @@ impl HirDisplay for Path {
                         }
                     }
                 }
-                write!(f, ">")?;
+
+                // There may be no generic arguments to print, in case of a trait having only a
+                // single `Self` bound which is converted to `<Ty as Trait>::Assoc`.
+                if !first {
+                    write!(f, ">")?;
+                }
+
+                // Current position: `<Ty as Trait<Args>|`
+                if generic_args.has_self_type {
+                    write!(f, ">")?;
+                }
             }
         }
+
         Ok(())
     }
 }

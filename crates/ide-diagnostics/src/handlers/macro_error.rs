@@ -51,6 +51,9 @@ macro_rules! compile_error { () => {} }
 
   compile_error!("compile_error macro works");
 //^^^^^^^^^^^^^ error: compile_error macro works
+
+  compile_error! { "compile_error macro braced works" }
+//^^^^^^^^^^^^^ error: compile_error macro braced works
             "#,
         );
     }
@@ -77,7 +80,7 @@ macro_rules! m {
 
 fn f() {
     m!();
-  //^^^^ error: unresolved macro `$crate::private::concat!`
+  //^^^^ error: unresolved macro $crate::private::concat
 }
 
 //- /core.rs crate:core
@@ -154,6 +157,7 @@ struct S;
     fn macro_diag_builtin() {
         check_diagnostics(
             r#"
+//- minicore: fmt
 #[rustc_builtin_macro]
 macro_rules! env {}
 
@@ -162,9 +166,6 @@ macro_rules! include {}
 
 #[rustc_builtin_macro]
 macro_rules! compile_error {}
-
-#[rustc_builtin_macro]
-macro_rules! format_args { () => {} }
 
 fn main() {
     // Test a handful of built-in (eager) macros:
@@ -186,7 +187,7 @@ fn main() {
     // Lazy:
 
     format_args!();
-  //^^^^^^^^^^^ error: no rule matches input tokens
+  //^^^^^^^^^^^ error: Syntax Error in Expansion: expected expression
 }
 "#,
         );

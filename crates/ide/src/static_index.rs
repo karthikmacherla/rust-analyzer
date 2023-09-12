@@ -12,6 +12,7 @@ use ide_db::{
 };
 use syntax::{AstNode, SyntaxKind::*, TextRange, T};
 
+use crate::inlay_hints::InlayFieldsToResolve;
 use crate::{
     hover::hover_for_definition,
     inlay_hints::AdjustmentHintsMode,
@@ -88,7 +89,7 @@ pub struct StaticIndexedFile {
 
 fn all_modules(db: &dyn HirDatabase) -> Vec<Module> {
     let mut worklist: Vec<_> =
-        Crate::all(db).into_iter().map(|krate| krate.root_module(db)).collect();
+        Crate::all(db).into_iter().map(|krate| krate.root_module()).collect();
     let mut modules = Vec::new();
 
     while let Some(module) = worklist.pop() {
@@ -125,6 +126,7 @@ impl StaticIndex<'_> {
                     max_length: Some(25),
                     closure_capture_hints: false,
                     closing_brace_hints_min_lines: Some(25),
+                    fields_to_resolve: InlayFieldsToResolve::empty(),
                 },
                 file_id,
                 None,

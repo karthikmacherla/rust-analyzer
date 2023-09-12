@@ -8,10 +8,7 @@
 //!
 //! FIXME: No span and source file information is implemented yet
 
-use proc_macro::{
-    bridge::{self, server},
-    LineColumn,
-};
+use proc_macro::bridge::{self, server};
 
 mod token_stream;
 pub use token_stream::TokenStream;
@@ -20,7 +17,10 @@ use token_stream::TokenStreamBuilder;
 mod symbol;
 pub use symbol::*;
 
-use std::ops::{Bound, Range};
+use std::{
+    iter,
+    ops::{Bound, Range},
+};
 
 use crate::tt;
 
@@ -83,9 +83,7 @@ impl server::TokenStream for RustAnalyzer {
         stream.is_empty()
     }
     fn from_str(&mut self, src: &str) -> Self::TokenStream {
-        use std::str::FromStr;
-
-        Self::TokenStream::from_str(src).expect("cannot parse string")
+        src.parse().expect("cannot parse string")
     }
     fn to_string(&mut self, stream: &Self::TokenStream) -> String {
         stream.to_string()
@@ -104,7 +102,7 @@ impl server::TokenStream for RustAnalyzer {
                     },
                 };
                 let tree = TokenTree::from(group);
-                Self::TokenStream::from_iter(vec![tree])
+                Self::TokenStream::from_iter(iter::once(tree))
             }
 
             bridge::TokenTree::Ident(ident) => {
@@ -114,7 +112,7 @@ impl server::TokenStream for RustAnalyzer {
                 let ident: tt::Ident = tt::Ident { text, span: ident.span };
                 let leaf = tt::Leaf::from(ident);
                 let tree = TokenTree::from(leaf);
-                Self::TokenStream::from_iter(vec![tree])
+                Self::TokenStream::from_iter(iter::once(tree))
             }
 
             bridge::TokenTree::Literal(literal) => {
@@ -126,7 +124,7 @@ impl server::TokenStream for RustAnalyzer {
                 let literal = tt::Literal { text, span: literal.0.span };
                 let leaf = tt::Leaf::from(literal);
                 let tree = TokenTree::from(leaf);
-                Self::TokenStream::from_iter(vec![tree])
+                Self::TokenStream::from_iter(iter::once(tree))
             }
 
             bridge::TokenTree::Punct(p) => {
@@ -137,7 +135,7 @@ impl server::TokenStream for RustAnalyzer {
                 };
                 let leaf = tt::Leaf::from(punct);
                 let tree = TokenTree::from(leaf);
-                Self::TokenStream::from_iter(vec![tree])
+                Self::TokenStream::from_iter(iter::once(tree))
             }
         }
     }
@@ -304,14 +302,6 @@ impl server::Span for RustAnalyzer {
         // FIXME handle span
         Range { start: 0, end: 0 }
     }
-    fn start(&mut self, _span: Self::Span) -> LineColumn {
-        // FIXME handle span
-        LineColumn { line: 0, column: 0 }
-    }
-    fn end(&mut self, _span: Self::Span) -> LineColumn {
-        // FIXME handle span
-        LineColumn { line: 0, column: 0 }
-    }
     fn join(&mut self, first: Self::Span, _second: Self::Span) -> Option<Self::Span> {
         // Just return the first span again, because some macros will unwrap the result.
         Some(first)
@@ -330,12 +320,22 @@ impl server::Span for RustAnalyzer {
         tt::TokenId::unspecified()
     }
 
-    fn after(&mut self, _self_: Self::Span) -> Self::Span {
+    fn end(&mut self, _self_: Self::Span) -> Self::Span {
         tt::TokenId::unspecified()
     }
 
-    fn before(&mut self, _self_: Self::Span) -> Self::Span {
+    fn start(&mut self, _self_: Self::Span) -> Self::Span {
         tt::TokenId::unspecified()
+    }
+
+    fn line(&mut self, _span: Self::Span) -> usize {
+        // FIXME handle line
+        0
+    }
+
+    fn column(&mut self, _span: Self::Span) -> usize {
+        // FIXME handle column
+        0
     }
 }
 
@@ -356,12 +356,12 @@ impl server::Server for RustAnalyzer {
     }
 
     fn intern_symbol(ident: &str) -> Self::Symbol {
-        // FIXME: should be self.interner once the proc-macro api allows is
+        // FIXME: should be `self.interner` once the proc-macro api allows it.
         Symbol::intern(&SYMBOL_INTERNER, &::tt::SmolStr::from(ident))
     }
 
     fn with_symbol_string(symbol: &Self::Symbol, f: impl FnOnce(&str)) {
-        // FIXME: should be self.interner once the proc-macro api allows is
+        // FIXME: should be `self.interner` once the proc-macro api allows it.
         f(symbol.text(&SYMBOL_INTERNER).as_str())
     }
 }

@@ -98,6 +98,66 @@ fn#19 main#20(#21)#21 {#22
 "##]],
     );
 }
+
+#[test]
+fn eager_expands_with_unresolved_within() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+fn main(foo: ()) {
+    format_args!("{} {} {}", format_args!("{}", 0), foo, identity!(10), "bar")
+}
+"#,
+        expect![[r##"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+fn main(foo: ()) {
+    builtin #format_args ("{} {} {}", format_args!("{}", 0), foo, identity!(10), "bar")
+}
+"##]],
+    );
+}
+
+#[test]
+fn token_mapping_eager() {
+    check(
+        r#"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+macro_rules! identity {
+    ($expr:expr) => { $expr };
+}
+
+fn main(foo: ()) {
+    format_args/*+tokenids*/!("{} {} {}", format_args!("{}", 0), foo, identity!(10), "bar")
+}
+
+"#,
+        expect![[r##"
+#[rustc_builtin_macro]
+#[macro_export]
+macro_rules! format_args {}
+
+macro_rules! identity {
+    ($expr:expr) => { $expr };
+}
+
+fn main(foo: ()) {
+    // format_args/*+tokenids*/!("{} {} {}"#1,#2 format_args#3!#4("{}"#6,#7 0#8),#9 foo#10,#11 identity#12!#13(10#15),#16 "bar"#17)
+builtin#4294967295 ##4294967295format_args#4294967295 (#0"{} {} {}"#1,#2 format_args#3!#4(#5"{}"#6,#7 0#8)#5,#9 foo#10,#11 identity#12!#13(#1410#15)#14,#16 "bar"#17)#0
+}
+
+"##]],
+    );
+}
+
 #[test]
 fn float_field_access_macro_input() {
     check(
@@ -807,6 +867,37 @@ macro_rules! m {
 }
 fn foo() {
     let a = foo::bar;
+}
+"#]],
+    );
+}
+
+#[test]
+fn test_type_path_is_transcribed_as_expr_path() {
+    check(
+        r#"
+macro_rules! m {
+    ($p:path) => { let $p; }
+}
+fn test() {
+    m!(S)
+    m!(S<i32>)
+    m!(S<S<i32>>)
+    m!(S<{ module::CONST < 42 }>)
+}
+"#,
+        expect![[r#"
+macro_rules! m {
+    ($p:path) => { let $p; }
+}
+fn test() {
+    let S;
+    let S:: <i32> ;
+    let S:: <S:: <i32>> ;
+    let S:: < {
+        module::CONST<42
+    }
+    > ;
 }
 "#]],
     );

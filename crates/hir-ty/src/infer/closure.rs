@@ -322,7 +322,7 @@ impl InferenceContext<'_> {
             Expr::Path(p) => {
                 let resolver = resolver_for_expr(self.db.upcast(), self.owner, tgt_expr);
                 if let Some(r) = resolver.resolve_path_in_value_ns(self.db.upcast(), p) {
-                    if let ResolveValueResult::ValueNs(v) = r {
+                    if let ResolveValueResult::ValueNs(v, _) = r {
                         if let ValueNs::LocalBinding(b) = v {
                             return Some(HirPlace { local: b, projections: vec![] });
                         }
@@ -452,6 +452,8 @@ impl InferenceContext<'_> {
 
     fn walk_expr_without_adjust(&mut self, tgt_expr: ExprId) {
         match &self.body[tgt_expr] {
+            Expr::OffsetOf(_) => (),
+            Expr::InlineAsm(e) => self.walk_expr_without_adjust(e.e),
             Expr::If { condition, then_branch, else_branch } => {
                 self.consume_expr(*condition);
                 self.consume_expr(*then_branch);
@@ -487,10 +489,6 @@ impl InferenceContext<'_> {
                 if let Some(tail) = tail {
                     self.consume_expr(*tail);
                 }
-            }
-            Expr::While { condition, body, label: _ } => {
-                self.consume_expr(*condition);
-                self.consume_expr(*body);
             }
             Expr::Call { callee, args, is_assignee_expr: _ } => {
                 self.consume_expr(*callee);
@@ -624,6 +622,7 @@ impl InferenceContext<'_> {
             | Expr::Tuple { exprs, is_assignee_expr: _ } => {
                 self.consume_exprs(exprs.iter().copied())
             }
+
             Expr::Missing
             | Expr::Continue { .. }
             | Expr::Path(_)

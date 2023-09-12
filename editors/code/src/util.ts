@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { strict as nativeAssert } from "assert";
 import { exec, type ExecOptions, spawnSync } from "child_process";
 import { inspect } from "util";
+import type { Env } from "./client";
 
 export function noop() { }
 
@@ -99,10 +100,13 @@ export function isDocumentInWorkspace(document: RustDocument): boolean {
     return false;
 }
 
-export function isValidExecutable(path: string): boolean {
+export function isValidExecutable(path: string, extraEnv: Env): boolean {
     log.debug("Checking availability of a binary at", path);
 
-    const res = spawnSync(path, ["--version"], { encoding: "utf8" });
+    const res = spawnSync(path, ["--version"], {
+        encoding: "utf8",
+        env: { ...process.env, ...extraEnv },
+    });
 
     const printOutput = res.error ? log.warn : log.info;
     printOutput(path, "--version:", res);
@@ -120,7 +124,7 @@ export function setContextValue(key: string, value: any): Thenable<void> {
  * underlying async function.
  */
 export function memoizeAsync<Ret, TThis, Param extends string>(
-    func: (this: TThis, arg: Param) => Promise<Ret>
+    func: (this: TThis, arg: Param) => Promise<Ret>,
 ) {
     const cache = new Map<string, Ret>();
 
@@ -148,21 +152,6 @@ export function execute(command: string, options: ExecOptions): Promise<string> 
 
             if (stderr) {
                 reject(new Error(stderr));
-                return;
-            }
-
-            resolve(stdout.trimEnd());
-        });
-    });
-}
-
-export function executeDiscoverProject(command: string, options: ExecOptions): Promise<string> {
-    log.info(`running command: ${command}`);
-    return new Promise((resolve, reject) => {
-        exec(command, options, (err, stdout, _) => {
-            if (err) {
-                log.error(err);
-                reject(err);
                 return;
             }
 

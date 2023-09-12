@@ -25,13 +25,20 @@ use triomphe::Arc;
 
 use crate::{
     body::{Body, BodyDiagnostic, BodySourceMap, ExprPtr, LabelPtr, PatPtr},
+    builtin_type::BuiltinUint,
     data::adt::StructKind,
     db::DefDatabase,
     expander::Expander,
     hir::{
-        dummy_expr_id, Array, Binding, BindingAnnotation, BindingId, BindingProblems, CaptureBy,
-        ClosureKind, Expr, ExprId, Label, LabelId, Literal, LiteralOrConst, MatchArm, Movability,
-        Pat, PatId, RecordFieldPat, RecordLitField, Statement,
+        dummy_expr_id,
+        format_args::{
+            self, FormatAlignment, FormatArgs, FormatArgsPiece, FormatArgument, FormatArgumentKind,
+            FormatArgumentsCollector, FormatCount, FormatDebugHex, FormatOptions,
+            FormatPlaceholder, FormatSign, FormatTrait,
+        },
+        Array, Binding, BindingAnnotation, BindingId, BindingProblems, CaptureBy, ClosureKind,
+        Expr, ExprId, InlineAsm, Label, LabelId, Literal, LiteralOrConst, MatchArm, Movability,
+        OffsetOf, Pat, PatId, RecordFieldPat, RecordLitField, Statement,
     },
     item_scope::BuiltinShadowMode,
     lang_item::LangItem,
@@ -41,6 +48,8 @@ use crate::{
     type_ref::{Mutability, Rawness, TypeRef},
     AdtId, BlockId, BlockLoc, ConstBlockLoc, DefWithBodyId, ModuleDefId, UnresolvedMacro,
 };
+
+type FxIndexSet<K> = indexmap::IndexSet<K, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 pub(super) fn lower(
     db: &dyn DefDatabase,
@@ -313,13 +322,7 @@ impl ExprCollector<'_> {
                 let body = self.collect_labelled_block_opt(label, e.loop_body());
                 self.alloc_expr(Expr::Loop { body, label }, syntax_ptr)
             }
-            ast::Expr::WhileExpr(e) => {
-                let label = e.label().map(|label| self.collect_label(label));
-                let body = self.collect_labelled_block_opt(label, e.loop_body());
-                let condition = self.collect_expr_opt(e.condition());
-
-                self.alloc_expr(Expr::While { condition, body, label }, syntax_ptr)
-            }
+            ast::Expr::WhileExpr(e) => self.collect_while_loop(syntax_ptr, e),
             ast::Expr::ForExpr(e) => self.collect_for_loop(syntax_ptr, e),
             ast::Expr::CallExpr(e) => {
                 let is_rustc_box = {
@@ -443,7 +446,6 @@ impl ExprCollector<'_> {
                                 None => self.missing_expr(),
                             };
                             let src = self.expander.to_source(AstPtr::new(&field));
-                            self.source_map.field_map.insert(src.clone(), expr);
                             self.source_map.field_map_back.insert(expr, src);
                             Some(RecordLitField { name, expr })
                         })
@@ -511,6 +513,9 @@ impl ExprCollector<'_> {
                 let mut args = Vec::new();
                 let mut arg_types = Vec::new();
                 if let Some(pl) = e.param_list() {
+                    let num_params = pl.params().count();
+                    args.reserve_exact(num_params);
+                    arg_types.reserve_exact(num_params);
                     for param in pl.params() {
                         let pat = this.collect_pat_top(param.pat());
                         let type_ref =
@@ -582,11 +587,6 @@ impl ExprCollector<'_> {
                     syntax_ptr,
                 )
             }
-            ast::Expr::BoxExpr(e) => {
-                let expr = self.collect_expr_opt(e.expr());
-                self.alloc_expr(Expr::Box { expr }, syntax_ptr)
-            }
-
             ast::Expr::ArrayExpr(e) => {
                 let kind = e.kind();
 
@@ -656,6 +656,16 @@ impl ExprCollector<'_> {
                 }
             }
             ast::Expr::UnderscoreExpr(_) => self.alloc_expr(Expr::Underscore, syntax_ptr),
+            ast::Expr::AsmExpr(e) => {
+                let e = self.collect_expr_opt(e.expr());
+                self.alloc_expr(Expr::InlineAsm(InlineAsm { e }), syntax_ptr)
+            }
+            ast::Expr::OffsetOfExpr(e) => {
+                let container = Interned::new(TypeRef::from_ast_opt(&self.ctx(), e.ty()));
+                let fields = e.fields().map(|it| it.as_name()).collect();
+                self.alloc_expr(Expr::OffsetOf(OffsetOf { container, fields }), syntax_ptr)
+            }
+            ast::Expr::FormatArgsExpr(f) => self.collect_format_args(f, syntax_ptr),
         })
     }
 
@@ -666,6 +676,7 @@ impl ExprCollector<'_> {
         let result_expr_id = self.alloc_expr(Expr::Missing, syntax_ptr);
         let prev_binding_owner = self.current_binding_owner.take();
         self.current_binding_owner = Some(result_expr_id);
+
         (result_expr_id, prev_binding_owner)
     }
 
@@ -729,6 +740,52 @@ impl ExprCollector<'_> {
         *tail = Some(next_tail);
         self.current_try_block_label = old_label;
         expr_id
+    }
+
+    /// Desugar `ast::WhileExpr` from: `[opt_ident]: while <cond> <body>` into:
+    /// ```ignore (pseudo-rust)
+    /// [opt_ident]: loop {
+    ///   if <cond> {
+    ///     <body>
+    ///   }
+    ///   else {
+    ///     break;
+    ///   }
+    /// }
+    /// ```
+    /// FIXME: Rustc wraps the condition in a construct equivalent to `{ let _t = <cond>; _t }`
+    /// to preserve drop semantics. We should probably do the same in future.
+    fn collect_while_loop(&mut self, syntax_ptr: AstPtr<ast::Expr>, e: ast::WhileExpr) -> ExprId {
+        let label = e.label().map(|label| self.collect_label(label));
+        let body = self.collect_labelled_block_opt(label, e.loop_body());
+
+        // Labels can also be used in the condition expression, like this:
+        // ```
+        // fn main() {
+        //     let mut optional = Some(0);
+        //     'my_label: while let Some(a) = match optional {
+        //         None => break 'my_label,
+        //         Some(val) => Some(val),
+        //     } {
+        //         println!("{}", a);
+        //         optional = None;
+        //     }
+        // }
+        // ```
+        let condition = match label {
+            Some(label) => {
+                self.with_labeled_rib(label, |this| this.collect_expr_opt(e.condition()))
+            }
+            None => self.collect_expr_opt(e.condition()),
+        };
+
+        let break_expr =
+            self.alloc_expr(Expr::Break { expr: None, label: None }, syntax_ptr.clone());
+        let if_expr = self.alloc_expr(
+            Expr::If { condition, then_branch: body, else_branch: Some(break_expr) },
+            syntax_ptr.clone(),
+        );
+        self.alloc_expr(Expr::Loop { body: if_expr, label }, syntax_ptr)
     }
 
     /// Desugar `ast::ForExpr` from: `[opt_ident]: for <pat> in <head> <body>` into:
@@ -893,15 +950,14 @@ impl ExprCollector<'_> {
         self.alloc_expr(Expr::Match { expr, arms }, syntax_ptr)
     }
 
-    fn collect_macro_call<F, T, U>(
+    fn collect_macro_call<T, U>(
         &mut self,
         mcall: ast::MacroCall,
         syntax_ptr: AstPtr<ast::MacroCall>,
         record_diagnostics: bool,
-        collector: F,
+        collector: impl FnOnce(&mut Self, Option<T>) -> U,
     ) -> U
     where
-        F: FnOnce(&mut Self, Option<T>) -> U,
         T: ast::AstNode,
     {
         // File containing the macro call. Expansion errors will be attached here.
@@ -1081,7 +1137,9 @@ impl ExprCollector<'_> {
                 ast::Stmt::ExprStmt(es) => matches!(es.expr(), Some(ast::Expr::MacroExpr(_))),
                 _ => false,
             });
-            statement_has_item || matches!(block.tail_expr(), Some(ast::Expr::MacroExpr(_)))
+            statement_has_item
+                || matches!(block.tail_expr(), Some(ast::Expr::MacroExpr(_)))
+                || (block.may_carry_attributes() && block.attrs().next().is_some())
         };
 
         let block_id = if block_has_items {
@@ -1271,23 +1329,21 @@ impl ExprCollector<'_> {
             ast::Pat::RecordPat(p) => {
                 let path =
                     p.path().and_then(|path| self.expander.parse_path(self.db, path)).map(Box::new);
-                let args = p
-                    .record_pat_field_list()
-                    .expect("every struct should have a field list")
+                let record_pat_field_list =
+                    &p.record_pat_field_list().expect("every struct should have a field list");
+                let args = record_pat_field_list
                     .fields()
                     .filter_map(|f| {
                         let ast_pat = f.pat()?;
                         let pat = self.collect_pat(ast_pat, binding_list);
                         let name = f.field_name()?.as_name();
+                        let src = self.expander.to_source(AstPtr::new(&f));
+                        self.source_map.pat_field_map_back.insert(pat, src);
                         Some(RecordFieldPat { name, pat })
                     })
                     .collect();
 
-                let ellipsis = p
-                    .record_pat_field_list()
-                    .expect("every struct should have a field list")
-                    .rest_pat()
-                    .is_some();
+                let ellipsis = record_pat_field_list.rest_pat().is_some();
 
                 Pat::Record { path, args, ellipsis }
             }
@@ -1507,6 +1563,401 @@ impl ExprCollector<'_> {
         }
     }
     // endregion: labels
+
+    // region: format
+    fn expand_macros_to_string(&mut self, expr: ast::Expr) -> Option<(ast::String, bool)> {
+        let m = match expr {
+            ast::Expr::MacroExpr(m) => m,
+            ast::Expr::Literal(l) => {
+                return match l.kind() {
+                    ast::LiteralKind::String(s) => Some((s, true)),
+                    _ => None,
+                }
+            }
+            _ => return None,
+        };
+        let e = m.macro_call()?;
+        let macro_ptr = AstPtr::new(&e);
+        let (exp, _) = self.collect_macro_call(e, macro_ptr, true, |this, expansion| {
+            expansion.and_then(|it| this.expand_macros_to_string(it))
+        })?;
+        Some((exp, false))
+    }
+
+    fn collect_format_args(
+        &mut self,
+        f: ast::FormatArgsExpr,
+        syntax_ptr: AstPtr<ast::Expr>,
+    ) -> ExprId {
+        let mut args = FormatArgumentsCollector::new();
+        f.args().for_each(|arg| {
+            args.add(FormatArgument {
+                kind: match arg.name() {
+                    Some(name) => FormatArgumentKind::Named(name.as_name()),
+                    None => FormatArgumentKind::Normal,
+                },
+                expr: self.collect_expr_opt(arg.expr()),
+            });
+        });
+        let template = f.template();
+        let fmt_snippet = template.as_ref().map(ToString::to_string);
+        let fmt = match template.and_then(|it| self.expand_macros_to_string(it)) {
+            Some((s, is_direct_literal)) => {
+                format_args::parse(&s, fmt_snippet, args, is_direct_literal, |name| {
+                    self.alloc_expr_desugared(Expr::Path(Path::from(name)))
+                })
+            }
+            None => FormatArgs { template: Default::default(), arguments: args.finish() },
+        };
+
+        // Create a list of all _unique_ (argument, format trait) combinations.
+        // E.g. "{0} {0:x} {0} {1}" -> [(0, Display), (0, LowerHex), (1, Display)]
+        let mut argmap = FxIndexSet::default();
+        for piece in fmt.template.iter() {
+            let FormatArgsPiece::Placeholder(placeholder) = piece else { continue };
+            if let Ok(index) = placeholder.argument.index {
+                argmap.insert((index, ArgumentType::Format(placeholder.format_trait)));
+            }
+        }
+
+        let lit_pieces =
+            fmt.template
+                .iter()
+                .enumerate()
+                .filter_map(|(i, piece)| {
+                    match piece {
+                        FormatArgsPiece::Literal(s) => Some(
+                            self.alloc_expr_desugared(Expr::Literal(Literal::String(s.clone()))),
+                        ),
+                        &FormatArgsPiece::Placeholder(_) => {
+                            // Inject empty string before placeholders when not already preceded by a literal piece.
+                            if i == 0
+                                || matches!(fmt.template[i - 1], FormatArgsPiece::Placeholder(_))
+                            {
+                                Some(self.alloc_expr_desugared(Expr::Literal(Literal::String(
+                                    "".into(),
+                                ))))
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                })
+                .collect();
+        let lit_pieces = self.alloc_expr_desugared(Expr::Array(Array::ElementList {
+            elements: lit_pieces,
+            is_assignee_expr: false,
+        }));
+        let lit_pieces = self.alloc_expr_desugared(Expr::Ref {
+            expr: lit_pieces,
+            rawness: Rawness::Ref,
+            mutability: Mutability::Shared,
+        });
+        let format_options = {
+            // Generate:
+            //     &[format_spec_0, format_spec_1, format_spec_2]
+            let elements = fmt
+                .template
+                .iter()
+                .filter_map(|piece| {
+                    let FormatArgsPiece::Placeholder(placeholder) = piece else { return None };
+                    Some(self.make_format_spec(placeholder, &mut argmap))
+                })
+                .collect();
+            let array = self.alloc_expr_desugared(Expr::Array(Array::ElementList {
+                elements,
+                is_assignee_expr: false,
+            }));
+            self.alloc_expr_desugared(Expr::Ref {
+                expr: array,
+                rawness: Rawness::Ref,
+                mutability: Mutability::Shared,
+            })
+        };
+        let arguments = &*fmt.arguments.arguments;
+
+        let args = if arguments.is_empty() {
+            let expr = self.alloc_expr_desugared(Expr::Array(Array::ElementList {
+                elements: Box::default(),
+                is_assignee_expr: false,
+            }));
+            self.alloc_expr_desugared(Expr::Ref {
+                expr,
+                rawness: Rawness::Ref,
+                mutability: Mutability::Shared,
+            })
+        } else {
+            // Generate:
+            //     &match (&arg0, &arg1, &…) {
+            //         args => [
+            //             <core::fmt::Argument>::new_display(args.0),
+            //             <core::fmt::Argument>::new_lower_hex(args.1),
+            //             <core::fmt::Argument>::new_debug(args.0),
+            //             …
+            //         ]
+            //     }
+            let args = argmap
+                .iter()
+                .map(|&(arg_index, ty)| {
+                    let arg = self.alloc_expr_desugared(Expr::Ref {
+                        expr: arguments[arg_index].expr,
+                        rawness: Rawness::Ref,
+                        mutability: Mutability::Shared,
+                    });
+                    self.make_argument(arg, ty)
+                })
+                .collect();
+            let array = self.alloc_expr_desugared(Expr::Array(Array::ElementList {
+                elements: args,
+                is_assignee_expr: false,
+            }));
+            self.alloc_expr_desugared(Expr::Ref {
+                expr: array,
+                rawness: Rawness::Ref,
+                mutability: Mutability::Shared,
+            })
+        };
+
+        // Generate:
+        //     <core::fmt::Arguments>::new_v1_formatted(
+        //         lit_pieces,
+        //         args,
+        //         format_options,
+        //         unsafe { ::core::fmt::UnsafeArg::new() }
+        //     )
+
+        let Some(new_v1_formatted) =
+            LangItem::FormatArguments.ty_rel_path(self.db, self.krate, name![new_v1_formatted])
+        else {
+            return self.missing_expr();
+        };
+        let Some(unsafe_arg_new) =
+            LangItem::FormatUnsafeArg.ty_rel_path(self.db, self.krate, name![new])
+        else {
+            return self.missing_expr();
+        };
+        let new_v1_formatted = self.alloc_expr_desugared(Expr::Path(new_v1_formatted));
+
+        let unsafe_arg_new = self.alloc_expr_desugared(Expr::Path(unsafe_arg_new));
+        let unsafe_arg_new = self.alloc_expr_desugared(Expr::Call {
+            callee: unsafe_arg_new,
+            args: Box::default(),
+            is_assignee_expr: false,
+        });
+        let unsafe_arg_new = self.alloc_expr_desugared(Expr::Unsafe {
+            id: None,
+            statements: Box::default(),
+            tail: Some(unsafe_arg_new),
+        });
+
+        self.alloc_expr(
+            Expr::Call {
+                callee: new_v1_formatted,
+                args: Box::new([lit_pieces, args, format_options, unsafe_arg_new]),
+                is_assignee_expr: false,
+            },
+            syntax_ptr,
+        )
+    }
+
+    /// Generate a hir expression for a format_args placeholder specification.
+    ///
+    /// Generates
+    ///
+    /// ```text
+    ///     <core::fmt::rt::Placeholder::new(
+    ///         …usize, // position
+    ///         '…', // fill
+    ///         <core::fmt::rt::Alignment>::…, // alignment
+    ///         …u32, // flags
+    ///         <core::fmt::rt::Count::…>, // width
+    ///         <core::fmt::rt::Count::…>, // precision
+    ///     )
+    /// ```
+    fn make_format_spec(
+        &mut self,
+        placeholder: &FormatPlaceholder,
+        argmap: &mut FxIndexSet<(usize, ArgumentType)>,
+    ) -> ExprId {
+        let position = match placeholder.argument.index {
+            Ok(arg_index) => {
+                let (i, _) =
+                    argmap.insert_full((arg_index, ArgumentType::Format(placeholder.format_trait)));
+                self.alloc_expr_desugared(Expr::Literal(Literal::Uint(
+                    i as u128,
+                    Some(BuiltinUint::Usize),
+                )))
+            }
+            Err(_) => self.missing_expr(),
+        };
+        let &FormatOptions {
+            ref width,
+            ref precision,
+            alignment,
+            fill,
+            sign,
+            alternate,
+            zero_pad,
+            debug_hex,
+        } = &placeholder.format_options;
+        let fill = self.alloc_expr_desugared(Expr::Literal(Literal::Char(fill.unwrap_or(' '))));
+
+        let align = {
+            let align = LangItem::FormatAlignment.ty_rel_path(
+                self.db,
+                self.krate,
+                match alignment {
+                    Some(FormatAlignment::Left) => name![Left],
+                    Some(FormatAlignment::Right) => name![Right],
+                    Some(FormatAlignment::Center) => name![Center],
+                    None => name![Unknown],
+                },
+            );
+            match align {
+                Some(path) => self.alloc_expr_desugared(Expr::Path(path)),
+                None => self.missing_expr(),
+            }
+        };
+        // This needs to match `Flag` in library/core/src/fmt/rt.rs.
+        let flags: u32 = ((sign == Some(FormatSign::Plus)) as u32)
+            | ((sign == Some(FormatSign::Minus)) as u32) << 1
+            | (alternate as u32) << 2
+            | (zero_pad as u32) << 3
+            | ((debug_hex == Some(FormatDebugHex::Lower)) as u32) << 4
+            | ((debug_hex == Some(FormatDebugHex::Upper)) as u32) << 5;
+        let flags = self.alloc_expr_desugared(Expr::Literal(Literal::Uint(
+            flags as u128,
+            Some(BuiltinUint::U32),
+        )));
+        let precision = self.make_count(&precision, argmap);
+        let width = self.make_count(&width, argmap);
+
+        let format_placeholder_new = {
+            let format_placeholder_new =
+                LangItem::FormatPlaceholder.ty_rel_path(self.db, self.krate, name![new]);
+            match format_placeholder_new {
+                Some(path) => self.alloc_expr_desugared(Expr::Path(path)),
+                None => self.missing_expr(),
+            }
+        };
+
+        self.alloc_expr_desugared(Expr::Call {
+            callee: format_placeholder_new,
+            args: Box::new([position, fill, align, flags, precision, width]),
+            is_assignee_expr: false,
+        })
+    }
+
+    /// Generate a hir expression for a format_args Count.
+    ///
+    /// Generates:
+    ///
+    /// ```text
+    ///     <core::fmt::rt::Count>::Is(…)
+    /// ```
+    ///
+    /// or
+    ///
+    /// ```text
+    ///     <core::fmt::rt::Count>::Param(…)
+    /// ```
+    ///
+    /// or
+    ///
+    /// ```text
+    ///     <core::fmt::rt::Count>::Implied
+    /// ```
+    fn make_count(
+        &mut self,
+        count: &Option<FormatCount>,
+        argmap: &mut FxIndexSet<(usize, ArgumentType)>,
+    ) -> ExprId {
+        match count {
+            Some(FormatCount::Literal(n)) => {
+                match LangItem::FormatCount.ty_rel_path(self.db, self.krate, name![Is]) {
+                    Some(count_is) => {
+                        let count_is = self.alloc_expr_desugared(Expr::Path(count_is));
+                        let args = self.alloc_expr_desugared(Expr::Literal(Literal::Uint(
+                            *n as u128,
+                            Some(BuiltinUint::Usize),
+                        )));
+                        self.alloc_expr_desugared(Expr::Call {
+                            callee: count_is,
+                            args: Box::new([args]),
+                            is_assignee_expr: false,
+                        })
+                    }
+                    None => self.missing_expr(),
+                }
+            }
+            Some(FormatCount::Argument(arg)) => {
+                if let Ok(arg_index) = arg.index {
+                    let (i, _) = argmap.insert_full((arg_index, ArgumentType::Usize));
+
+                    match LangItem::FormatCount.ty_rel_path(self.db, self.krate, name![Param]) {
+                        Some(count_param) => {
+                            let count_param = self.alloc_expr_desugared(Expr::Path(count_param));
+                            let args = self.alloc_expr_desugared(Expr::Literal(Literal::Uint(
+                                i as u128,
+                                Some(BuiltinUint::Usize),
+                            )));
+                            self.alloc_expr_desugared(Expr::Call {
+                                callee: count_param,
+                                args: Box::new([args]),
+                                is_assignee_expr: false,
+                            })
+                        }
+                        None => self.missing_expr(),
+                    }
+                } else {
+                    self.missing_expr()
+                }
+            }
+            None => match LangItem::FormatCount.ty_rel_path(self.db, self.krate, name![Implied]) {
+                Some(count_param) => self.alloc_expr_desugared(Expr::Path(count_param)),
+                None => self.missing_expr(),
+            },
+        }
+    }
+
+    /// Generate a hir expression representing an argument to a format_args invocation.
+    ///
+    /// Generates:
+    ///
+    /// ```text
+    ///     <core::fmt::Argument>::new_…(arg)
+    /// ```
+    fn make_argument(&mut self, arg: ExprId, ty: ArgumentType) -> ExprId {
+        use ArgumentType::*;
+        use FormatTrait::*;
+        match LangItem::FormatArgument.ty_rel_path(
+            self.db,
+            self.krate,
+            match ty {
+                Format(Display) => name![new_display],
+                Format(Debug) => name![new_debug],
+                Format(LowerExp) => name![new_lower_exp],
+                Format(UpperExp) => name![new_upper_exp],
+                Format(Octal) => name![new_octal],
+                Format(Pointer) => name![new_pointer],
+                Format(Binary) => name![new_binary],
+                Format(LowerHex) => name![new_lower_hex],
+                Format(UpperHex) => name![new_upper_hex],
+                Usize => name![from_usize],
+            },
+        ) {
+            Some(new_fn) => {
+                let new_fn = self.alloc_expr_desugared(Expr::Path(new_fn));
+                self.alloc_expr_desugared(Expr::Call {
+                    callee: new_fn,
+                    args: Box::new([arg]),
+                    is_assignee_expr: false,
+                })
+            }
+            None => self.missing_expr(),
+        }
+    }
+    // endregion: format
 }
 
 fn pat_literal_to_hir(lit: &ast::LiteralPat) -> Option<(Literal, ast::Literal)> {
@@ -1581,4 +2032,10 @@ impl ExprCollector<'_> {
 fn comma_follows_token(t: Option<syntax::SyntaxToken>) -> bool {
     (|| syntax::algo::skip_trivia_token(t?.next_token()?, syntax::Direction::Next))()
         .map_or(false, |it| it.kind() == syntax::T![,])
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+enum ArgumentType {
+    Format(FormatTrait),
+    Usize,
 }

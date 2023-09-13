@@ -365,7 +365,7 @@ async function fetchAndUpdateChildrenForTestModuleNode(testModuleNode: TestModul
     assert(
         testModuleNode.isDummyTestModule() ===
         (testModuleNode.declarationInfo.uri.toString() === testModuleNode.definitionUri.toString())
-        , "if the test module is not a declaration module, it must be the root module of some target node");
+        , "The test module is either a declaration module, or the root module of some target node");
 
     const definitionUri = testModuleNode.definitionUri;
 
@@ -405,7 +405,9 @@ function isTestNodeAndRunnableMatched(node: TestLikeNode, runnable: RunnableFacd
 }
 
 /**
- * Update test module's children with new fetched runnables
+ * Update test module node's children with new fetched runnables
+ *
+ * It's assumed the runnables are fetched from the same file of the test module node
  *
  * @param parentNode
  * @param runnables
@@ -451,7 +453,7 @@ async function updateFileDefinitionTestModuleByRunnables(parentNode: TestModuleN
 
         const finalRunnables = [...declarationModuleRunnables, ...testRunnables, ...withItemsModuleRunnables];
 
-        // get all children in the file of test module
+        // get previous children of the test module node
         const childrenOfParentnode = ChildrenCollector.collect(parentNode);
         const childrenInTheSameFile = childrenOfParentnode.filter(node => isTestLikeNodeInTheSameFile(node, parentNode));
 

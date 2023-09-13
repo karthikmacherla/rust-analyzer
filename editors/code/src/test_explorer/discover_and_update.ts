@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { testController } from ".";
 import type * as ra from "../lsp_ext";
-import { assert, assertNever, isCargoTomlDocument, isRustDocument } from "../util";
+import { assert, assertNever, isCargoTomlDocument, isRustDocument, sleep } from "../util";
 import { RaApiHelper } from "./api_helper";
 import { RunnableFacde } from "./RunnableFacde";
 import type { CargoMetadata } from "../toolchain";
@@ -22,6 +22,8 @@ import {
     DummyRootNode,
 } from "./test_model_tree";
 import { fail } from "assert";
+
+export const disposiables: vscode.Disposable[] = [];
 
 async function discoverAllFilesInWorkspaces() {
     if (!vscode.workspace.workspaceFolders) {
@@ -51,7 +53,14 @@ function registerWatcherForWorkspaces() {
         .map(watchWorkspace);
 }
 
-export async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextEditor | undefined) {
+function registerActiveTextEditor() {
+    const disposable = vscode.window.onDidChangeActiveTextEditor(onDidChangeActiveTextEditorForTestExplorer);
+    disposiables.push(disposable);
+}
+
+async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextEditor | undefined) {
+    if (!testController) return;
+
     if (!e) {
         return;
     }
@@ -64,19 +73,30 @@ export async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextE
     await handleFileChangeCore(e.document.uri);
 };
 
-export const watchers: vscode.FileSystemWatcher[] = [];
-
+// Not watch the change of file(the disk), instead, use `onDidChangeTextDocument` to watch the editor(the memory of VSCode)
+//
+// This also means, please do not use other ways to change the file, such as in terminal or another editor
+// However, VSCode would trigger `onDidChangeTextDocument` for an opened file when you change and saved it in other place
+//
+// Because:
+// 1. if auto-save is enabled, the event would be triggered twice, then we need to give a longer debounce time(more than 1s) to avoid duplicate work
+// 2. For now, RA is synced with VSCode rather than disk
+//     2.2 A change in disk is confused in fact. Let's say you have content A on dist, content B on VSCode. You save content C on disk now.
+//         What should we do? What should VSCode do? Should VSCode send content C to RA? If so, it would be inconsistant with the content in VSCode!
 function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
     const rsRrojectWatcher = watchRustProjectFileChange(workspaceFolder);
     const rsFileWatcher = watchRustFileChange(workspaceFolder);
-    watchers.push(rsRrojectWatcher);
-    watchers.push(rsFileWatcher);
+    disposiables.push(rsRrojectWatcher);
+    disposiables.push(rsFileWatcher);
 
     // For now, the only supported project file is cargo.
     function watchRustProjectFileChange(workspaceFolder: vscode.WorkspaceFolder): vscode.FileSystemWatcher {
         const pattern = new vscode.RelativePattern(workspaceFolder, '**/Cargo.toml');
         const watcher = vscode.workspace.createFileSystemWatcher(
             pattern,
+            false,
+            true, // not listen to change event in fact
+            false
         );
         watcher.onDidCreate(handleRustProjectFileCreate);
         watcher.onDidChange(handleRustProjectFileChange);
@@ -84,31 +104,53 @@ function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
         return watcher;
     }
 
+    // refresh all things if the project file is changed
+    // Because we do not know whther the change would
+    //     - change packages
+    //     - change targets(.e.g, changing bin file path)
+    function handleRustProjectFileCreate() { debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS); }
+    function handleRustProjectFileChange() { debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS); }
+    function handleRustProjectFileDelete() { debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS); }
+
     function watchRustFileChange(workspaceFolder: vscode.WorkspaceFolder) {
         const pattern = new vscode.RelativePattern(workspaceFolder, '**/*.rs');
         const watcher = vscode.workspace.createFileSystemWatcher(
             pattern,
+            false,
+            true,  // not listen to change event in fact
+            false
         );
         watcher.onDidCreate(handleRustFileCreate);
         watcher.onDidChange(handleRustFileChange);
         watcher.onDidDelete(handleRustFileDelete);
         return watcher;
     }
+
+    async function handleRustFileCreate(uri: vscode.Uri) {
+        // We need to order this after language server updates, but there's no API for that.
+        // Hence, good old sleep().
+        await sleep(20);
+        await loadFileAndUpdateModel(uri);
+        updateTestItemsByModel();
+    }
+
+    async function handleRustFileChange(uri: vscode.Uri) {
+        // We need to order this after language server updates, but there's no API for that.
+        // Hence, good old sleep().
+        await sleep(20);
+        await debounceHandleFileChangeCore(uri);
+    }
+
+    async function handleRustFileDelete(uri: vscode.Uri) {
+        // We need to order this after language server updates, but there's no API for that.
+        // Hence, good old sleep().
+        await sleep(20);
+        DummyRootNode.instance.removeTestItemsRecursivelyByUri(uri);
+        updateTestItemsByModel();
+    }
 }
 
-// Why 2 seconds:
-// when auto save is enabled, there seems to be 2 events for workspace.onDidChangeTextDocument
-// the first one is for the change of the file, the second one is for the save of the file
-// And usually it takes about 1s between on my machine between the two events
-const FILE_DEBOUNCE_DELAY_MS = 2000;
-
-// refresh all things if the project file is changed
-// Because we do not know whther the change would
-//     - change packages
-//     - change targets(.e.g, changing bin file path)
-const handleRustProjectFileCreate = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
-const handleRustProjectFileChange = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
-const handleRustProjectFileDelete = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
+const FILE_DEBOUNCE_DELAY_MS = 500; // 0.5s, assume charactor typing speed is 2/s
 
 function debounce(fn: Function, ms: number) {
     let timeout: NodeJS.Timeout | undefined = undefined;
@@ -173,24 +215,8 @@ async function refreshCore() {
     }
 }
 
-async function handleRustFileCreate(uri: vscode.Uri) {
-    // Maybe we need to a "smart" strategy, when too much files changes in short time,
-    // we change to rebuild all.
-    await loadFileAndUpdateModel(uri);
-    updateTestItemsByModel();
-}
-
 async function handleFileChangeCore(uri: vscode.Uri) {
     await loadFileAndUpdateModel(uri);
-    updateTestItemsByModel();
-}
-
-async function handleRustFileChange(uri: vscode.Uri) {
-    await debounceHandleFileChangeCore(uri);
-}
-
-async function handleRustFileDelete(uri: vscode.Uri) {
-    DummyRootNode.instance.removeTestItemsRecursivelyByUri(uri);
     updateTestItemsByModel();
 }
 
@@ -198,6 +224,9 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
     if (!item) {
         // init logic
         registerWatcherForWorkspaces();
+        registerActiveTextEditor();
+        disposiables.push();
+
         await discoverAllFilesInWorkspaces();
         return;
     }
@@ -215,7 +244,7 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
 
     switch (node.kind) {
         case NodeKind.DummyRoot:
-            fail("Package data is got when getting workspace data, no need to be resolved lazily");
+            fail("Dummy root should never be visited");
         case NodeKind.CargoWorkspace:
             fail("Package data is got when getting workspace data, no need to be resolved lazily");
         case NodeKind.CargoPackage:

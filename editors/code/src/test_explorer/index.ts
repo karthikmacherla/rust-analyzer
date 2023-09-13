@@ -1,15 +1,13 @@
 import * as vscode from "vscode";
-import { onDidChangeActiveTextEditorForTestExplorer, refreshHandler, resolveHandler, watchers } from "./discover_and_update";
+import { refreshHandler, resolveHandler, disposiables } from "./discover_and_update";
 import { runHandler } from "./run_or_debug";
 
 export let testController: vscode.TestController | undefined;
-let disposeChangeAcitveTextEditor: vscode.Disposable;
 
 export function deactivateTestController(): void {
   testController?.dispose();
-  disposeChangeAcitveTextEditor.dispose();
-  while (watchers.length !== 0) {
-    const watcher = watchers.pop();
+  while (disposiables.length !== 0) {
+    const watcher = disposiables.pop();
     watcher?.dispose();
   }
   testController = undefined;
@@ -37,7 +35,6 @@ export function activeTestController(): void {
     true,
   );
 
-  disposeChangeAcitveTextEditor = vscode.window.onDidChangeActiveTextEditor(onDidChangeActiveTextEditorForTestExplorer);
 
   testController.resolveHandler = resolveHandler;
 

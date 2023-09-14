@@ -39,14 +39,18 @@ function registerWatcherForWorkspaces() {
     }
 
     // listen to document changes to re-parse unsaved changes:
-    vscode.workspace.onDidChangeTextDocument(e => {
+    vscode.workspace.onDidChangeTextDocument(async e => {
         const document = e.document;
 
-        if (!isRustDocument(document)) {
+        if (isRustDocument(document)) {
+            await handleRustFileChange(document.uri);
             return;
         }
 
-        debounceHandleFileChangeCore(e.document.uri);
+        if (isCargoTomlDocument(document)) {
+            await handleRustProjectFileEvent(e.document.uri);
+            return;
+        }
     });
 
     vscode.workspace.workspaceFolders
@@ -65,12 +69,11 @@ async function onDidChangeActiveTextEditorForTestExplorer(e: vscode.TextEditor |
         return;
     }
 
-    if (!isRustDocument(e.document) && !isCargoTomlDocument(e.document)) {
+    if (isRustDocument(e.document)) {
+        // as if the file is changed, to update its related info, immediately.
+        await handleRustFileChangeCore(e.document.uri);
         return;
     }
-
-    // as if the file is changed, to update its related info.
-    await handleFileChangeCore(e.document.uri);
 };
 
 // Not watch the change of file(the disk), instead, use `onDidChangeTextDocument` to watch the editor(the memory of VSCode)
@@ -98,19 +101,10 @@ function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
             true, // not listen to change event in fact
             false
         );
-        watcher.onDidCreate(handleRustProjectFileCreate);
-        watcher.onDidChange(handleRustProjectFileChange);
-        watcher.onDidDelete(handleRustProjectFileDelete);
+        watcher.onDidCreate(handleRustProjectFileEvent);
+        watcher.onDidDelete(handleRustProjectFileEvent);
         return watcher;
     }
-
-    // refresh all things if the project file is changed
-    // Because we do not know whther the change would
-    //     - change packages
-    //     - change targets(.e.g, changing bin file path)
-    function handleRustProjectFileCreate() { debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS); }
-    function handleRustProjectFileChange() { debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS); }
-    function handleRustProjectFileDelete() { debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS); }
 
     function watchRustFileChange(workspaceFolder: vscode.WorkspaceFolder) {
         const pattern = new vscode.RelativePattern(workspaceFolder, '**/*.rs');
@@ -121,37 +115,46 @@ function watchWorkspace(workspaceFolder: vscode.WorkspaceFolder) {
             false
         );
         watcher.onDidCreate(handleRustFileCreate);
-        watcher.onDidChange(handleRustFileChange);
         watcher.onDidDelete(handleRustFileDelete);
         return watcher;
     }
+}
 
-    async function handleRustFileCreate(uri: vscode.Uri) {
-        // We need to order this after language server updates, but there's no API for that.
-        // Hence, good old sleep().
-        await sleep(20);
-        await loadFileAndUpdateModel(uri);
-        updateTestItemsByModel();
-    }
+// refresh all things if the project file is added/changed/deleted
+// Because we do not know whther the change would
+//     - change packages
+//     - change targets(.e.g, changing bin file path)
+function handleRustProjectFileEvent(uri: vscode.Uri) {
+    // We need to order this after language server updates, but there's no API for that.
+    // debounce will wait a short time
+    debounceRefreshCore();
+}
 
-    async function handleRustFileChange(uri: vscode.Uri) {
-        // We need to order this after language server updates, but there's no API for that.
-        // Hence, good old sleep().
-        await sleep(20);
-        await debounceHandleFileChangeCore(uri);
-    }
+async function handleRustFileCreate(uri: vscode.Uri) {
+    // We need to order this after language server updates, but there's no API for that.
+    // Hence, good old sleep().
+    await sleep(20);
+    await loadFileAndUpdateModel(uri);
+    updateTestItemsByModel();
+}
 
-    async function handleRustFileDelete(uri: vscode.Uri) {
-        // We need to order this after language server updates, but there's no API for that.
-        // Hence, good old sleep().
-        await sleep(20);
-        DummyRootNode.instance.removeTestItemsRecursivelyByUri(uri);
-        updateTestItemsByModel();
-    }
+async function handleRustFileChange(uri: vscode.Uri) {
+    // We need to order this after language server updates, but there's no API for that.
+    // debounce will wait a short time
+    debounceHandleRustFileChangeCore(uri);
+}
+
+async function handleRustFileDelete(uri: vscode.Uri) {
+    // We need to order this after language server updates, but there's no API for that.
+    // Hence, good old sleep().
+    await sleep(20);
+    DummyRootNode.instance.removeTestItemsRecursivelyByUri(uri);
+    updateTestItemsByModel();
 }
 
 const FILE_DEBOUNCE_DELAY_MS = 500; // 0.5s, assume charactor typing speed is 2/s
 
+// FIXME: if there are changes in two files, we will lost the first change. But it would rarely happen
 function debounce(fn: Function, ms: number) {
     let timeout: NodeJS.Timeout | undefined = undefined;
     return (...params: any[]) => {
@@ -163,7 +166,8 @@ function debounce(fn: Function, ms: number) {
 }
 
 // FIXME: if there are changes in two files, we will lost the first chagne
-const debounceHandleFileChangeCore = debounce(handleFileChangeCore, FILE_DEBOUNCE_DELAY_MS);
+const debounceHandleRustFileChangeCore = debounce(handleRustFileChangeCore, FILE_DEBOUNCE_DELAY_MS);
+const debounceRefreshCore = debounce(refreshCore, FILE_DEBOUNCE_DELAY_MS);
 
 export async function refreshHandler() {
     await refreshCore();
@@ -215,12 +219,12 @@ async function refreshCore() {
     }
 }
 
-async function handleFileChangeCore(uri: vscode.Uri) {
+async function handleRustFileChangeCore(uri: vscode.Uri) {
     await loadFileAndUpdateModel(uri);
     updateTestItemsByModel();
 }
 
-export const resolveHandler: vscode.TestController["resolveHandler"] = async function (item) {
+export const resolveHandler  = async function (item:vscode.TestItem|undefined) {
     if (!item) {
         // init logic
         registerWatcherForWorkspaces();
@@ -229,15 +233,6 @@ export const resolveHandler: vscode.TestController["resolveHandler"] = async fun
 
         await discoverAllFilesInWorkspaces();
         return;
-    }
-
-    const idPath: string[] = [];
-    let tmpItem = item;
-    idPath.push(tmpItem.id);
-
-    while (tmpItem.parent) {
-        idPath.unshift(tmpItem.parent.id);
-        tmpItem = tmpItem.parent;
     }
 
     const node = getTestModelByTestItem(item);

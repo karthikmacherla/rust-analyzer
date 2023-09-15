@@ -81,11 +81,6 @@ async function getChosenTestItems(request: vscode.TestRunRequest) {
         return;
     }
 
-    if (request.include.length !== 1 && request.profile.kind == vscode.TestRunProfileKind.Debug) {
-        await vscode.window.showWarningMessage("Sorry, for now, one and only one test item need to be picked when using Testing Explorer powered by Rust-Analyzer");
-        return;
-    }
-
     return request.include;
 }
 
@@ -94,21 +89,41 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
         return;
     }
 
-    // Without `await` intentionally, because we don't want to block the UI thread.
-    void vscode.window.showInformationMessage("The test item status will be updated after debug session is terminated");
-
-    assert(chosenTestItems.length === 1, "only support 1 select test item for debugging, at least for now.");
-    const chosenTestItem = chosenTestItems[0]!; // safe, because we have checked the length.
-    const runnable = getRunnableByTestItem(chosenTestItem);
-    const runnableOrigin = runnable.origin;
-
     const disposables: vscode.Disposable[] = [];
+    const runnables = chosenTestItems.map((chosenTestItem) => {
+        return getRunnableByTestItem(chosenTestItem);
+    })
 
-    // most of the following logic comes from vscode-java-test repo. Thanks!
-    const { debugConfig, isFromLacunchJson } = await getDebugConfiguration(raContext, runnableOrigin);
+    // if we're debugging multiple testItems, they must all be individual tests 
+    // and from the same crate for multiple debugging to work
+    const debuggingMultipleTests = chosenTestItems.length > 1
+    if (chosenTestItems.length > 1) {
+        const allInvididualTests = runnables.every((runnable) => runnable.testKind === NodeKind.Test)
+        
+        // the first runnable will serve as a template for the remaining selected tests
+        const firstRunnable = runnables[0]!
+        const binaryName = firstRunnable.origin.args.workspaceRoot
+        const allFromSameBinary = runnables.every((runnable) => runnable.origin.args.workspaceRoot === binaryName)
+        if (!allInvididualTests || !allFromSameBinary) {
+            // fail here
+            await vscode.window.showInformationMessage("Sorry, for now, debugging multiple tests must be from the same crate")
+            return
+        }
+    }
 
-    if (!debugConfig) {
+    const firstRunnableOrigin =  runnables[0]!.origin
+    const { debugConfig, isFromLacunchJson } = await getDebugConfiguration(raContext, firstRunnableOrigin);
+        
+    if (!debugConfig)
         return;
+
+    // the trick here is to add all of the other remaining tests to the args list 
+    // since they are in the same crate
+    if (debuggingMultipleTests) {
+        const testNameArgs = runnables.map((runnable) => runnable.origin.args.executableArgs[0]).filter((arg) => arg !== undefined)
+        debugConfig['args'] = testNameArgs
+        debugConfig['args'].push('--exact')
+        debugConfig['args'].push('--nocapture')
     }
 
     if (debugConfig.type !== 'lldb') {
@@ -129,13 +144,15 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
         debugConfig["stdio"] = [null, outputFilePath];
     }
 
-    if (runnable.testKind === NodeKind.TestModule) {
-        TestItemControllerHelper.visitTestItemTreePreOrder(testItem => {
-            testRun.enqueued(testItem);
-        }, chosenTestItem.children);
-    } else {
-        testRun.enqueued(chosenTestItem);
-    }
+    runnables.forEach((runnable, index) => {
+        if (runnable.testKind === NodeKind.TestModule) {
+            TestItemControllerHelper.visitTestItemTreePreOrder(testItem => {
+                testRun.enqueued(testItem);
+            }, chosenTestItems[index]!.children);
+        } else {
+            testRun.enqueued(chosenTestItems[index]!);
+        }
+    })
 
     let debugSession: vscode.DebugSession | undefined;
     disposables.push(vscode.debug.onDidStartDebugSession((session: vscode.DebugSession) => {
@@ -165,8 +182,11 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
                     if (outputFilePath) {
                         const fileLineContents = (await fs.readFile(outputFilePath, 'utf-8'))
                             .split(/\r?\n/);
-                        const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
-                        outputAnalyzer.analyticsLines(fileLineContents);
+
+                        chosenTestItems.forEach((chosenTestItem) => {
+                            const outputAnalyzer = new LinesRustOutputAnalyzer(testRun, chosenTestItem);
+                            outputAnalyzer.analyticsLines(fileLineContents);
+                        })
                     }
                     dispose();
                     return resolve();

@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as toolchain from "../toolchain";
 import { testController } from ".";
-import { spawn } from "child_process";
+import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { assert } from "../util";
 import { createArgs, prepareEnv } from "../run";
 import { getRunnableByTestItem } from "./discover_and_update";
@@ -81,11 +81,10 @@ async function getChosenTestItems(request: vscode.TestRunRequest) {
         return;
     }
 
-    if (request.include.length !== 1) {
+    if (request.include.length !== 1 && request.profile.kind == vscode.TestRunProfileKind.Debug) {
         await vscode.window.showWarningMessage("Sorry, for now, one and only one test item need to be picked when using Testing Explorer powered by Rust-Analyzer");
         return;
     }
-    // Not handle exclude for now, because we only support one test item to run anyway.
 
     return request.include;
 }
@@ -188,54 +187,60 @@ async function debugChosenTestItems(testRun: vscode.TestRun, chosenTestItems: re
  * @param chosenTestItems The chosen ones of test items. The test cases which should be run should be the children of them.
  */
 async function runChosenTestItems(testRun: vscode.TestRun, chosenTestItems: readonly vscode.TestItem[], token: vscode.CancellationToken) {
-    assert(chosenTestItems.length === 1, "only support 1 select test item for running, at least for now.");
-    const chosenTestItem = chosenTestItems[0]!; // safe, because we have checked the length.
-    const runnable = getRunnableByTestItem(chosenTestItem);
-    const runnableOrigin = runnable.origin;
+    const childProcesses: ChildProcessWithoutNullStreams[] = []
+    chosenTestItems.forEach(async (chosenTestItem) => {
+        const runnable = getRunnableByTestItem(chosenTestItem);
+        const runnableOrigin = runnable.origin;
 
-    const args = createArgs(runnableOrigin);
+        const args = createArgs(runnableOrigin);
 
-    // Remove --nocapture, so that we could analytics the output easily and always correctly.
-    // Otherwise, if the case writes into stdout, due to the parallel execution,
-    // the output might be messy and it might be even impossible to analytic.
-    const finalArgs = args.filter(arg => arg !== '--nocapture');
+        // Remove --nocapture, so that we could analytics the output easily and always correctly.
+        // Otherwise, if the case writes into stdout, due to the parallel execution,
+        // the output might be messy and it might be even impossible to analytic.
+        const finalArgs = args.filter(arg => arg !== '--nocapture');
 
-    const cwd = runnableOrigin.args.workspaceRoot || ".";
+        const cwd = runnableOrigin.args.workspaceRoot || ".";
 
-    assert(finalArgs[0] === 'test', "We only support 'test' command in test explorer for now!");
+        assert(finalArgs[0] === 'test', "We only support 'test' command in test explorer for now!");
 
-    // TODO: add override cargo
-    // overrideCargo: runnable.args.overrideCargo;
-    const cargoPath = await toolchain.cargoPath();
+        // TODO: add override cargo
+        // overrideCargo: runnable.args.overrideCargo;
+        const cargoPath = await toolchain.cargoPath();
 
-    if (runnable.testKind === NodeKind.TestModule) {
-        TestItemControllerHelper.visitTestItemTreePreOrder(testItem => {
-            testRun.enqueued(testItem);
-        }, chosenTestItem.children);
-    } else {
-        testRun.enqueued(chosenTestItem);
-    }
-
-    // output the runned command.
-    testRun.appendOutput(`${cargoPath} ${finalArgs.join(' ')}`);
-
-    const outputAnalyzer = new PipeRustcOutputAnalyzer(testRun, chosenTestItem);
-
-    // start process and listen to the output
-    const childProcess = spawn(cargoPath, finalArgs, {
-        cwd,
-        stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
-        // FIXME: Should we inheritage the runnableEnv too?
-        env: prepareEnv(runnableOrigin, /* config.runnableEnv */undefined),
-    });
-    const stdio = childProcess.stdio;
-    stdio[1].on('data', data => outputAnalyzer.onStdOut(data));
-    stdio[2].on('data', data => outputAnalyzer.onStdErr(data));
-    childProcess.on('exit', () => outputAnalyzer.onClose());
-    token.onCancellationRequested(() => {
-        if (!childProcess.killed) {
-            childProcess.kill();
+        if (runnable.testKind === NodeKind.TestModule) {
+            TestItemControllerHelper.visitTestItemTreePreOrder(testItem => {
+                testRun.enqueued(testItem);
+            }, chosenTestItem.children);
+        } else {
+            testRun.enqueued(chosenTestItem);
         }
+
+        testRun.appendOutput(`${cargoPath} ${finalArgs.join(' ')}`);
+        // output the runned command.
+
+        const outputAnalyzer = new PipeRustcOutputAnalyzer(testRun, chosenTestItem);
+
+        // start process and listen to the output
+        const childProcess = spawn(cargoPath, finalArgs, {
+            cwd,
+            stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
+            // FIXME: Should we inheritage the runnableEnv too?
+            env: prepareEnv(runnableOrigin, /* config.runnableEnv */undefined),
+        });
+        childProcesses.push(childProcess)
+        const stdio = childProcess.stdio;
+        stdio[1].on('data', data => outputAnalyzer.onStdOut(data));
+        stdio[2].on('data', data => outputAnalyzer.onStdErr(data));
+        childProcess.on('exit', () => outputAnalyzer.onClose());
+    })
+
+    token.onCancellationRequested(() => {
+        childProcesses.forEach((childProcess) => {
+            if (!childProcess.killed) {
+                childProcess.kill();
+            }
+        })
         testRun.end();
     });
+
 }
